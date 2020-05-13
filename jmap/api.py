@@ -51,7 +51,7 @@ class JmapApi:
         self.results = []
         self.resultsByTag = {}
 
-        for cmd, args, tag in request.methodCalls:
+        for cmd, args, tag in request['methodCalls']:
             t0 = time.monotonic()
             logbit = ''
             func = getattr(self, "api_" + cmd.replace('/', '_'), None)
