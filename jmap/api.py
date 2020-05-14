@@ -96,11 +96,8 @@ class JmapApi:
         return {}
     
     def api_UserPreferences_get(self, ids=(), **kwargs):
-        self.db.begin()
         user = self.db.get_user()
-        accountid = self.db.accountid()
         data = self.db.dgetcol('juserprefs', {}, 'payload')
-        self.db.commit()
 
         lst = [json.loads(j) for j in data]
         if not lst:
@@ -119,7 +116,7 @@ class JmapApi:
             }]
 
         return {
-            'accountId': accountid,
+            'accountId': self.db.accountid,
             'state': user.jstateClientPreferences,
             'list': _filter_list(lst, ids),
             'notFound': [],
@@ -128,8 +125,7 @@ class JmapApi:
     def api_UserPreferences_set(self, accountId=None, create=None, update=None, destroy=None, **kwargs):
         self.db.begin()
         user = self.db.get_user()
-        accountid = self.db.accountid()
-        if accountId and accountId != accountid:
+        if accountId and accountId != self.db.accountid:
             self.db.rollback()
             raise AccountNotFound()
         self.db.commit()
@@ -162,7 +158,7 @@ class JmapApi:
         new_state = user.jstateClientPreferences
 
         return {
-            'accountId': accountid,
+            'accountId': self.db.accountid,
             'oldState': old_state,
             'newState': new_state,
             'created': created,
@@ -176,7 +172,6 @@ class JmapApi:
     def api_ClientPreferences_get(self, ids=None, **kwargs):
         self.db.begin()
         user = self.db.get_user()
-        accountid = self.db.accountid()
         data = self.db.dgetcol('juserprefs', {}, 'payload')
         self.db.commit()
 
@@ -215,7 +210,7 @@ class JmapApi:
             })
 
         return {
-            'accountId': accountid,
+            'accountId': self.db.accountid,
             'state': user.jstateClientPreferences,
             'list': _filter_list(lst, ids),
             'notFound': [],
@@ -224,10 +219,9 @@ class JmapApi:
     def api_VacationResponse_get(self, **kwargs):
         self.db.begin()
         user = self.db.get_user()
-        accountid = self.db.accountid()
         self.db.commit()
         return {
-            'accountId': accountid,
+            'accountId': self.db.accountid,
             'state': 'dummy',
             'list': [{
                 'id': 'singleton',
@@ -244,7 +238,6 @@ class JmapApi:
     def api_Quota_get(self, ids=None, **kwargs):
         self.begin()
         user = self.db.get_user()
-        accountid = self.db.accountid()
         self.db.commit()
         lst = (
             {
@@ -259,7 +252,7 @@ class JmapApi:
             },
         )
         return {
-            'accountId': accountid,
+            'accountId': self.db.accountid,
             'state': 'dummy',
             'list': _filter_list(lst, ids),
             'notFound': [],
@@ -268,12 +261,11 @@ class JmapApi:
     def api_Identity_get(self, **kwargs):
         self.db.begin()
         user = self.db.get_user()
-        accountid = self.db.accountid()
         self.db.commit()
 
         # TODO: fix Identity
         return {
-            'accountId': accountid,
+            'accountId': self.db.accountid,
             'state': 'dummy',
             'list': {
                 'id': "id1",
@@ -306,8 +298,7 @@ class JmapApi:
     def api_Mailbox_get(self, accountId=None, ids=None, properties=None, **kwargs):
         self.db.begin()
         user = self.db.get_user()
-        accountid = self.db.accountid()
-        if accountId and accountId != accountid:
+        if accountId and accountId != self.db.accountid:
             self.db.rollback()
             raise AccountNotFound()
         new_state = user.jstateMailbox
@@ -352,7 +343,7 @@ class JmapApi:
 
         return {
             'list': lst,
-            'accountId': accountid,
+            'accountId': self.db.accountid,
             'state': new_state,
             'notFound': list(want)
         }
@@ -360,8 +351,7 @@ class JmapApi:
     def api_Mailbox_query(self, accountId=None, sort=None, filter=None, position=0, anchor=None, anchorOffset=0, limit=None, **kwargs):
         self.db.begin()
         user = self.db.get_user()
-        accountid = self.db.accountid()
-        if accountId and accountId != accountid:
+        if accountId and accountId != self.db.accountid:
             self.db.rollback()
             raise AccountNotFound()
         data = self.db.dget('jmailboxes', {'active': 1})
@@ -386,7 +376,7 @@ class JmapApi:
             end = len(data)
         
         return {
-            'accountId': accountid,
+            'accountId': self.db.accountid,
             'filter': filter,
             'sort': sort,
             'queryState': user.jstateMailbox,
@@ -399,8 +389,7 @@ class JmapApi:
     def api_Mailbox_changes(self, sinceState, accountId=None, maxChanges=None, **kwargs):
         self.db.begin()
         user = self.db.get_user()
-        accountid = self.db.accountid()
-        if accountId and accountId != accountid:
+        if accountId and accountId != self.db.accountid:
             self.db.rollback()
             raise AccountNotFound()
 
@@ -431,7 +420,7 @@ class JmapApi:
                 # otherwise never seen
 
         return {
-            'accountId': accountid,
+            'accountId': self.db.accountid,
             'oldState': sinceState,
             'newState': new_state,
             'created': created,

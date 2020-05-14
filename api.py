@@ -1,3 +1,5 @@
+import re
+
 try:
     import orjson as json
 except ImportError:
@@ -18,7 +20,7 @@ async def app(scope, receive, send):
         await response(send, 400, b'Only json accepted.')
         return
 
-    match = re.match(r'^/jmap/([^/]+)(.*)', scope['path']):
+    match = re.match(r'^/jmap/([^/]+)(.*)', scope['path'])
     if match:
         accountid = match.group(1)
         client = match.group(2)
@@ -30,7 +32,7 @@ async def app(scope, receive, send):
             [b'content-type', b'application/json'],
             [b'content-length', b'%d' % len(body)],
         ])
-    else
+    else:
         await response(send, 404, b'404 Path Not found')
 
 
