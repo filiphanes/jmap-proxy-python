@@ -1,6 +1,7 @@
 import os
 import sqlite3
 import time
+import json
 
 TABLE2GROUPS = {
   'jmessages': ['Email'],
@@ -31,14 +32,58 @@ class JmapDatabase:
         self.dbh.close()
         os.unlink(self.dbpath)
     
+    def accountid(self):
+        return self.accountid
+    
+    def dbh(self):
+        if not hasattr(self, 't'):
+            print('Not in transaction')
+        else:
+            return self.t
+
     def in_transaction(self):
-        return bool(self.t)
+        return hasattr(self, 't')
 
     def begin(self):
+        if hasattr(self, 't'):
+            print('Already in transaction')
+            return
         self.t = self.dbh.cursor()
-        self.t.begin()
-    
+
     def commit(self):
+        if not hasattr(self, 't'):
+            print('Not in transaction')
+            return
+        mbupdates = self.t.pop('update_mailbox_counts', {})
+        for jmailboxid, val in mbupdates.items():
+            totalEmails = self.dbh.execute("""SELECT
+                    COUNT(DISTINCT msgid)
+                FROM jmessages JOIN jmessagemap USING (msgid)
+                WHERE jmailboxid = ?
+                  AND jmessages.active = 1
+                  AND jmessagemap.active = 1
+                """, [jmailboxid])
+            unreadEmails = self.dbh.execute("""SELECT
+                    COUNT(DISTINCT msgid)
+                FROM jmessages JOIN jmessagemap USING (msgid)
+                WHERE jmailboxid = ?
+                  AND jmessages.isUnread = 1
+                  AND jmessages.active = 1
+                  AND jmessagemap.active = 1
+                """, [jmailboxid])
+            totalThreads = self.dbh.execute("""SELECT
+                COUNT(DISTINCT thrid)
+                FROM jmessages JOIN jmessagemap USING (msgid)
+                WHERE jmailboxid = ?
+                  AND jmessages.active = 1
+                  AND jmessagemap.active = 1
+                  AND thrid IN
+                        (SELECT thrid
+                        FROM jmessages JOIN jmessagemap USING (msgid)
+                        WHERE isUnread = 1
+                            AND jmessages.active = 1
+                            AND jmessagemap.active = 1)
+                """, [jmailboxid])
         self.t.commit()
 
     def get_user(self):    
@@ -54,6 +99,28 @@ class JmapDatabase:
             }
             self.dbh.execute("INSERT INTO account (jhighestmodseq) VALUES (?)", [self.user['jhighestmodseq']])
         return self.user
+
+    def dirty(self, table):
+        if not self.t.modseq:
+            user = self.get_user()
+            user.jhighestmodseq += 1
+            self.t.modseq = user.jhighestmodseq
+        self.t.tables[table] = self.t.modseq
+        return self.t.modseq
+
+    def update_prefs(self, type, data):
+        if type == 'UserPreferences':
+            table = 'juserprefs'
+        elif type == 'ClientPreferences':
+            table = 'jclientprefs',
+        elif type == 'CalendarPreferences':
+            table = 'jcalendarprefs'
+        
+        modseq = self.dirty(table)
+        self.dbh.execute(f"""INSERT INTO {table}
+            (jprefid, payload, jcreated, jmodseq, active) VALUES
+            (?,?,?,?,?)""",
+            [data['id'], json.dumps(data)], modseq, modseq, 1)
 
     def _initdb(self):
         self.dbh.execute("""

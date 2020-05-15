@@ -123,12 +123,9 @@ class JmapApi:
         }
 
     def api_UserPreferences_set(self, accountId=None, create=None, update=None, destroy=None, **kwargs):
-        self.db.begin()
         user = self.db.get_user()
         if accountId and accountId != self.db.accountid:
-            self.db.rollback()
             raise AccountNotFound()
-        self.db.commit()
 
         old_state = user.jstateClientPreferences
         if create is None: create = {}
