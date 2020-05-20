@@ -22,7 +22,7 @@ TABLE2GROUPS = {
   'jcalendarprefs': ['CalendarPreferences'],
 }
 
-class JmapDatabase:
+class DB:
     def __init__(self, accountid):
         self.accountid = accountid
         self.dbpath = f"/home/jmap/data/{accountid}.db"
@@ -305,6 +305,10 @@ class JmapDatabase:
             self.delete_message_from_mailbox(msgid, oldid)
         self.touch_thread_by_msgid(msgid)
     
+    def report_messages(self, msgids, asSpam):
+        # TODO: actually report the messages (or at least check that they exist)
+        return msgids, ()
+
     def put_file(self, accountid, type, content, expires):
         size = len(content)
         c = self.dbh.execute('INSERT OR REPLACE INTO jfiles (type, size, content, expires) VALUES (?, ?, ?, ?)',
@@ -350,18 +354,30 @@ class JmapDatabase:
             sql += ' WHERE ' + ' AND '.join([k + '=?' for k in filter.keys()])
         self.dbh.execute(sql, values.values() + filter.values())
     
-    def filter_values(self, table, values, filter):
-        sql = 'SELECT' + ','.join(values.keys()) + f' FROM {table}' \
-            + ' WHERE ' + ' AND '.join([k + '=?' for k in filter.keys()])
-        data = self.dbh.execute(sql, filter.values())
-        for row
+    def filter_values(self, table, values, filter={}):
+        values = dict(values)
+        sql = 'SELECT' + ','.join(values.keys()) + ' FROM ' + table
+        if filter:
+            sql += ' WHERE ' + ' AND '.join([k + '=?' for k in filter.keys()])
+        for row in self.dbh.execute(sql, filter.values()):
+            data = row
+        else:
+            data = {}
+        for key in values.keys():
+            if filter[key] or (data.get(key, None) == values.get(key, None)):
+                del values[key]
+        return values
 
+    def dmaybeupdate(self, table, values, filter={}):
+        filtered = self.filter_values(table, values, filter)
+        if filtered:
+            return self.dupdate(table, filtered, filter)
+    
+    def ddirty(self, table, values, filter={}):
+        values['jmodseq'] = self.dirty(table)
+        return self.dupdate(table, values, filter)
 
-    def report_messages(self, msgids, asSpam):
-        # TODO: actually report the messages (or at least check that they exist)
-        return msgids, ()
-
-    def dmaybedirty(self, table, values=None, filter=None, modseqfields=()):
+    def dmaybedirty(self, table, values=None, filter={}, modseqfields=()):
         filtered = self.filter_values(table, values, filter)
         if not filtered:
             return
@@ -369,6 +385,77 @@ class JmapDatabase:
         for field in ('jmodseq', *modseqfields):
             filtered[field] = values[field] = modseq
         return self.dupdate(table, filtered, filter)
+
+    def dnuke(self, table, filter={}):
+        modseq = self.dirty(table)
+        sql = f'UPDATE {table} SET active=0, jmodseq=? WHERE active=1'
+        if filter:
+            sql += ' AND ' + ' AND '.join([k + '=?' for k in filter.keys()])
+        return self.dbh.execute(sql, [modseq] + filter.values())
+    
+    def ddelete(self, table, filter={}):
+        sql = f'DELETE FROM {table}'
+        if filter:
+            sql += ' WHERE ' + ' AND '.join([k + '=?' for k in filter.keys()])
+        return self.dbh.execute(sql, filter.values())
+
+    def dget(self, table, filter={}, fields='*'):
+        sql = f'SELECT {fields} FROM {table}'
+        conditions = []
+        values = []
+        for key, val in filter:
+            if isinstance(val, 'list'):
+                conditions.append(f'{key} {val[0]} ?')
+                values.append(val[1])
+            else:
+                conditions.append(key + '=?')
+                values.append(val)
+        if conditions:
+            sql += ' WHERE ' + ' AND '.join(conditions)
+        return self.dbh.execute(sql, values)
+
+    def dcount(self, table, filter={}):
+        sql = f'SELECT COUNT(*) FROM {table}'
+        conditions = []
+        values = []
+        for key, val in filter:
+            if isinstance(val, 'list'):
+                conditions.append(f'{key} {val[0]} ?')
+                values.append(val[1])
+            else:
+                conditions.append(key + '=?')
+                values.append(val)
+        if conditions:
+            sql += ' WHERE ' + ' AND '.join(conditions)
+        return self.dbh.execute(sql, values)
+
+    def dgetby(self, table, hashkey, filter={}, fields='*'):
+        data = self.dget(table, filter, fields)
+        return {d[hashkey]: d for d in data}
+
+    def dgetone(self, table, filter, fields='*'):
+        sql = f'SELECT {fields} FROM {table}'
+        conditions = []
+        values = []
+        for key, val in filter:
+            if isinstance(val, 'list'):
+                conditions.append(f'{key} {val[0]} ?')
+                values.append(val[1])
+            else:
+                conditions.append(key + '=?')
+                values.append(val)
+        if conditions:
+            sql += ' WHERE ' + ' AND '.join(conditions)
+        sql += ' LIMIT 1'
+        for row in self.dbh.execute(sql, values):
+            return row
+
+    def dgetfield(self, table, filter, field):
+        res = self.dgetone(table, filter, field)
+        return res.get(field, None)
+    
+    def dgetcol(self, table, filter={}, field=0):
+        return [row[field] for row in self.dget(table, filter, field)]
 
     def _initdb(self):
         self.dbh.execute("""
