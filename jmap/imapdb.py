@@ -2,6 +2,7 @@ from db import DB
 from time import time
 import json
 import hashlib
+from collections import defaultdict
 
 TAG = 1
 
@@ -37,6 +38,14 @@ ROLE_MAP = {
   '\\archive': 'archive',
   '\\drafts': 'drafts',
 }
+
+
+KEYWORD2FLAG = (
+    ('$answered', '\\Answered'),
+    ('$flagged', '\\Flagged'),
+    ('$draft', '\\Draft'),
+    ('$seen', '\\Seen'),
+)
 
 class ImapDB(DB):
     def setuser(self, args):
@@ -431,14 +440,10 @@ class ImapDB(DB):
         # store to the first named folder - we can use labels on gmail to add to other folders later.
         id, others = mailboxIds
         imapname = jmailmap[id][imapname]
-        flags = set()
-        for kw, flag in (
-            ('$answered', '\\Answered'),
-            ('$flagged', '\\Flagged'),
-            ('$draft', '\\Draft'),
-            ('$seen', '\\Seen'),
-            ):
-            flags.add(flag if kw in keywords else kw)
+        flags = set(keywords)
+        for kw, flag in KEYWORD2FLAG:
+            if flags.pop(kw):
+                flags.add(flag)
         internaldate = time()
         date = strftime(internaldate)
         appendres = self.backend.imap_append('imapname', '(' + ' '.join(flags) + ')', date, rfc822)
@@ -466,10 +471,177 @@ class ImapDB(DB):
         self.commit()
         return msgdata
     
+    def update_messages(self, changes, idmap):
+        if not changes:
+            return {}, {}
         
+        changed = {}
+        notchanged = {}
+        map = {}
+        msgids = set(changes.keys())
+        rows = self.dget('imessages', {
+            'msgid': ('IN', msgids)},
+            'msgid,ifolderid,uid')
+        for msgid, ifolderid, uid in rows:
+            if not msgid in map:
+                map[msgid] = {}
+            if not ifolderid in map[msgid]:
+                map[msgid][ifolderid] = set()
+            map[msgid][ifolderid].add(uid)
+            msgids.discard(msgid)
 
+        for msgid in msgids:
+            notchanged[msgid] = {
+                'type': 'notFound',
+                'description': 'No such message on server',
+            }
+        
+        folderdata = self.dget('ifolders')
+        foldermap = {f['ifolderid']: f for f in folderdata}
+        jmailmap = {f['jmailboxid']: f for f in folderdata if 'jmailboxid' in f}
+        jmapdata = self.dget('jmailboxes')
+        jidmap = {d['jmailboxid']: d.get('role', '') for d in jmapdata}
+        jrolemap = {d['role']: d['jmailboxid'] for d in jmapdata if 'role' in d}
 
+        for msgid in map.keys():
+            action = changes[msgid]
+            try:
+                for ifolderid, uids in map[msgid].items():
+                    # TODO: merge similar actions?
+                    imapname = foldermap[ifolderid].get('imapname')
+                    uidvalidity = foldermap[ifolderid].get('uidvalidity')
+                    if imapname and uidvalidity and 'keywords' in action:
+                        flags = set(action['keywords'])
+                        for kw, flag in KEYWORD2FLAG:
+                            if flags.pop(kw):
+                                flags.add(flag)
+                        self.backend.imap_update(imapname, uidvalidity, uids, flags)
 
+                if 'mailboxIds' in action:
+                    mboxes = [idmap[k] for k in action['mailboxIds'].keys()]
+                    # existing ifolderids containing this message
+                    # identify a source message to work from
+                    ifolderid = sorted(map[msgid])[0]
+                    uid = sorted(map[msgid][ifolderid])[0]
+                    imapname = foldermap[ifolderid]['imapname']
+                    uidvalidity = foldermap[ifolderid]['uidvalidity']
+
+                    # existing ifolderids with this message
+                    current = set(map[msgid].keys())
+                    # new ifolderids that should contain this message
+                    new = set(jmailmap[x]['ifolderid'] for x in mboxes)
+                    for ifolderid in new:
+                        # unless there's already a matching message in it
+                        if current.pop(ifolderid):
+                            continue
+                        # copy from the existing message
+                        newfolder = foldermap[ifolderid]['imapname']
+                        self.backend.imap_copy(imapname, uidvalidity, uid, newfolder)
+                    for ifolderid in current:
+                        # these ifolderids didn't exist in new, so delete all matching UIDs from these folders
+                        self.backend.imap_move(
+                            foldermap[ifolderid]['imapname'],
+                            foldermap[ifolderid]['uidvalidity'],
+                            map[msgid][ifolderid],  # uids
+                        )
+            except Exception as e:
+                notchanged[msgid] = {'type': 'error', 'description': str(e)}
+            else:
+                changed[msgid] = None
+
+        return changed, notchanged    
+
+    def destroy_messages(self, ids):
+        if not ids:
+            return [], {}
+        destroymap = defaultdict(dict)
+        notdestroyed = {}
+        idset = set(ids)
+        rows = self.dget('imessages', {'msgid': ('IN', idset)},
+                         'msgid,ifolderid,uid')
+        for msgid, ifolderid, uid in rows:
+            idset.discard(msgid)
+            destroymap[ifolderid][uid] = msgid
+        for msgid in idset:
+            notdestroyed[msgid] = {
+                'type': 'notFound',
+                'description': "No such message on server",
+            }
+
+        folderdata = self.dget('ifolders')
+        foldermap = {d['ifolderid']: d for d in folderdata}
+        jmailmap = {d['jmailboxid']: d for d in folderdata if 'jmailboxid' in d}
+        destroyed = []
+        for ifolderid, ifolder in destroymap.items():
+            #TODO: merge similar actions?
+            if not ifolder['imapname']:
+                for msgid in destroymap[ifolderid]:
+                    notdestroyed[msgid] = \
+                        {'type': 'notFound', 'description': "No folder"}
+            self.backend.imap_move(ifolder['imapname'], ifolder['uidvalidity'],
+                                   destroymap[ifolderid].keys(), None)
+            destroyed.extend(destroymap[ifolderid].values())
+
+        return destroyed, notdestroyed
+    
+    def deleted_record(self, ifolderid, uid):
+        msgid = self.dgetfield('imessages', {'ifolderid': ifolderid, 'uid': uid}, 'msgid')
+        if msgid:
+            self.ddelete('imessages', {'ifolderid': ifolderid, 'uid': uid})
+            self.mark_sync(msgid)
+    
+    def new_record(self, ifolderid, uid, flags, labels, envelope, internaldate, msgid, thrid, size):
+        self.dinsert('imessages', {
+            'ifolderid': ifolderid,
+            'flags': json.dumps([f for f in flags if f.lower() != '\\recent']),
+            'labels': json.dumps(sorted(labels)),
+            'internaldate': internaldate,
+            'msgid': msgid,
+            'thrid': thrid,
+            'envelope': json.dumps(envelope),
+            'size': size,
+        })
+        self.mark_sync(msgid)
+    
+    def sync_jmap_msgid(self, msgid):
+        labels = set()
+        flags = set()
+        for row in self.dget('imessages', {'msgid': msgid}, 'flags,labels'):
+            flags.update(json.loads(row['flags']))
+            labels.update(json.loads(row['labels']))
+
+        keywords = {}
+        for flag in flags:
+            flag = flag.lower()
+            for kw, f in KEYWORD2FLAG:
+                if flag == f:
+                    keywords[kw] = True
+                    break
+                else:
+                    keywords[flag] = True
+        
+        slabels = self.labels()
+        jmailboxids = [slabels[l][1] for l in labels]
+
+        if not jmailboxids:
+            return self.delete_message(msgid)
+        
+        if self.dgetfield('jmessages', {'msgid': msgid, 'active': 1}, 'msgid'):
+            return self.change_message(msgid, {'keywords': keywords}, jmailboxids)
+        else:
+            data = self.dgetone('imessages', {'msgid': msgid}, 'thrid,internaldate,size,envelope')
+            return self.add_message({
+                'msgid': msgid,
+                'internaldate': data['internaldate'],
+                'thrid': data['thrid'],
+                'msgsize': data['size'],
+                'keywords': flagdata,
+                'isDraft': int('$draft' in flagdata),
+                'isUnread': int('$seen' not in flagdata),
+                **_envelopedata(data['envelope']),
+            }, jmailboxids)
+
+    
 def _trimh(val):
     "DEPRECATED: Use directly val.trim()"
     return val.trim()

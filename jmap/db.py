@@ -404,7 +404,7 @@ class DB:
         conditions = []
         values = []
         for key, val in filter:
-            if isinstance(val, 'list'):
+            if type(val) in (tuple, list):
                 conditions.append(f'{key} {val[0]} ?')
                 values.append(val[1])
             else:
@@ -419,7 +419,7 @@ class DB:
         conditions = []
         values = []
         for key, val in filter:
-            if isinstance(val, 'list'):
+            if type(val) in (tuple, list):
                 conditions.append(f'{key} {val[0]} ?')
                 values.append(val[1])
             else:
@@ -438,7 +438,7 @@ class DB:
         conditions = []
         values = []
         for key, val in filter:
-            if isinstance(val, 'list'):
+            if type(val) in (tuple, list):
                 conditions.append(f'{key} {val[0]} ?')
                 values.append(val[1])
             else:
