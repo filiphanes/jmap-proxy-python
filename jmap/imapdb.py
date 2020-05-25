@@ -3,6 +3,7 @@ from time import time
 import json
 import hashlib
 from collections import defaultdict
+import re
 
 TAG = 1
 
@@ -635,13 +636,148 @@ class ImapDB(DB):
                 'internaldate': data['internaldate'],
                 'thrid': data['thrid'],
                 'msgsize': data['size'],
-                'keywords': flagdata,
-                'isDraft': int('$draft' in flagdata),
-                'isUnread': int('$seen' not in flagdata),
+                'keywords': keywords,
+                'isDraft': '$draft' in keywords,
+                'isUnread': '$seen' not in keywords,
                 **_envelopedata(data['envelope']),
             }, jmailboxids)
 
+    def sync_jmap(self):
+        for msgid in self.dgetcol('imsgidtodo', {}, 'msgid'):
+            self.sync_jmap_msgid()
+            self.ddelete('imsgidtodo', {'msgid': msgid})
+
+    def fill_messages(self, ids):
+        if not ids:
+            return
+        ids = set(ids)
+        rows = self.dbh.execute('SELECT msgid, parsed FROM jrawmessage WHERE msgid IN (' + ('?,' * len(ids))[:-1] + ')')
+        result = {}
+        for msgid, parsed in rows:
+            result[msgid] = json.loads(parsed)
+
+        need = ids.difference(result.keys())
+        udata = defaultdict(dict)
+        if need:
+            uids = self.dbh.execute('SELECT ifolderid, uid, msgid FROM imessages WHERE msgid IN (' + ('?,' * len(need))[:-1] + ')')
+            for ifolderid, uid, msgid in uids:
+                udata[ifolderid][uid] = msgid
+        
+        foldermap = {}
+        for ifolderid, uhash in udata.items():
+            uids = ','.join(u for u in uhash.keys() if u not in result[u])
+            if uids:
+                foldermap[ifolderid] = self.dgetone('ifolders', {'ifolderid': ifolderid}, 'imapname,uidvalidity')
+        
+        if not udata:
+            return result
+        
+        parsed = {}
+        for ifolderid, uhash in udata.items():
+            uids = ','.join(u for u in uhash.keys() if u not in result[u])
+            if not uids or not foldermap[ifolderid]:
+                continue
+            imapname, uidvalidity = foldermap[ifolderid]
+            res = self.backend.imap_fill(imapname, uidvalidity, uids)
+            for uid in res['data'].keys():
+                rfc822 = res['data'][uid]
+                if rfc822:
+                    msgid = uhash[uid]
+                    if msgid not in result:
+                        result[msgid] = parsed[msgid] = jmap.EmailObject.parse(rfc822, msgid)
+        
+        self.begin()
+        for msgid, message in parsed.items():
+            self.dinsert('jrawmessage', {
+                'msgid': msgid,
+                'parsed': json.dumps(message),
+                'hasAttachment': message.get('hasAttachment', False),
+            })
+        self.commit()
+
+        # XXX - handle not getting data that we need?
+        # stillneed = ids.difference(result.keys())
+        return result
+
+    def get_raw_message(self, msgid, part):
+        imapname, uidvalidity, uid = self.dhh.execute('SELECT imapname,uidvalidity,uid FROM ifolders JOIN imessages USING (ifolderid) WHERE msgid=?', [msgid])
+        if not imapname:
+            return None
+        typ = 'message/rfc822'
+        if part:
+            parsed = self.fill_messages(msgid)
+            typ = find_type(parsed[msgid], part)
+
+        res = self.backend.imap_getpart(imapname, uidvalidity, uid, part)
+        return type, res['data']
     
+    def create_mailboxes(self, new):
+        if not new:
+            return {}, {}
+        todo = set()
+        notcreated = {}
+        for cid, mailbox in new.items():
+            if not mailbox.get('name', ''):
+                notcreated[cid] = {'type': 'invalidProperties', 'description': 'name is required'}
+                continue
+            try:
+                encname = mailbox['name'].encode('IMAP-UTF-7')
+            except Exception:
+                notcreated[cid] = {'type': 'invalidProperties', 'description': 'name, can\'t be used with IMAP proxy'}
+            if mailbox.get('parentId', None):
+                row = self.dgetone('ifolders', {'jmailboxid': mailbox['parentId']}, 'imapname,sep')
+                if not row:
+                    notcreated[cid] = {'type': 'notFound', 'description': 'parent folder not found'}
+                    continue
+                todo[cid] = [row['imapname'] + row['sep'] + encname, row['sep']]
+            else:
+                for sep, in self.dbh.execute('SELECT sep FROM ifolders ORDER BY ifolderid'):
+                    prefix = self.dgetfield('iserver', {}, 'imapPrefix')
+                if not prefix:
+                    prefix = ''
+                todo[cid] = [prefix + encname, sep]
+        createmap = {}
+        
+        
+
+def find_type(message, part):
+    if message.get('id', '') == part:
+        return message['type']
+    
+    for sub in message['attachments']:
+        typ = find_type(sub, part)
+        if type:
+            return type
+    return None
+
+
+def _normalsubject(subject):
+    # Re: and friends
+    subject = re.sub(r'^[ \t]*[A-Za-z0-9]+:', subject, '')
+    # [LISTNAME] and friends
+    sub = re.sub(r'^[ \t]*\\[[^]]+\\]', subject, '')
+    # any old whitespace
+    sub = re.sub(r'[ \t\r\n]+', subject, '')
+    
+def _envelopedata(data='{}'):
+    envelope = json.loads(data)
+    encsub = envelope.get('subject', '').decode('MIME-HEADER')
+    if not encsub:
+        encsub = envelope['subject']
+    sortsub = _normalsubject(encsub)
+    return {
+        'msgsubject': encsub,
+        'sortsubject': sortsub,
+        'msgfrom': envelope.get('From', ''),
+        'msgto': envelope.get('To', ''),
+        'msgcc': envelope.get('To', ''),
+        'msgbcc': envelope.get('Cc', ''),
+        'msgdate': str2time(envelope.get('Date', '')),
+        'msginreplyto': envelope.get('In-Reply-To', '').strip(),
+        'msgmessageid': envelope.get('Message-ID', '').strip(),
+    }
+
+
 def _trimh(val):
     "DEPRECATED: Use directly val.trim()"
     return val.trim()
