@@ -737,7 +737,109 @@ class ImapDB(DB):
                     prefix = ''
                 todo[cid] = [prefix + encname, sep]
         createmap = {}
+    
+    def update_mailboxes(self, update, idmap):
+        if not update:
+            return {}, {}
+        changed = {}
+        notchanged = {}
+        namemap = {}
+        # XXX - reorder the crap out of this if renaming multiple mailboxes due to deep rename
+        for jid, mailbox in update.items():
+            if not mailbox:
+                notchanged[jid] = {'type': 'invalidProperties', 'description': "nothing to change"}
+            continue
+
+            data = self.dgetone('jmailboxes', {'jmailboxid': jid})
+            for key in mailbox.keys():  # TODO: check if valid
+                data[key] = update[key]
+            parentId = data.get('parentId', None)
+            if parentId:
+                parentId = idmap[parentId]
+            
+            try:
+                encname = data['name'].encode('IMAP-UTF-7')
+            except ValueError:
+                notchanged[jid] = {'type': 'invalidProperties', 'description': "name can\'t be used with IMAP proxy"}
+                continue
+
+            old = self.dgeone('ifolders', {'jmailboxid': jid}, 'imapname,ifolderid')
+            if parentId:
+                parent = self.dgetone('ifolders', {'jmailboxid': parentId}, 'imapname,sep')
+                if not parent:
+                    notchanged[jid] = {'type': 'invalidProperties', 'description': "parent folder not found"}
+                namemap[old['imapname']] = (parent['imapname'] + parent['sep'] + encname, jid, old['ifolderid'])
+            else:
+                prefix = self.dgetfield('iserver', {}, 'imapPrefix') or ''
+                namemap = [old['imapname']] = (prefix + encname, jid, old['ifolderid'])
         
+        toupdate = {}
+        for oldname in namemap.keys():
+            imapname, jid, ifolderid = namemap[oldname]
+            if imapname == oldname:
+                changed[jid] = None
+                continue
+            res = self.backend.rename_mailbox(oldname, imapname)
+            if res[1] == 'ok':
+                changed[jid] = None
+                toupdate[jid] = (imapname, ifolderid)
+            else:
+                notchanged[jid] = {'type': 'serverError', 'description': res[2]}
+
+        for jid in toupdate.keys():
+            impaname, ifolderid = toupdate[jid]
+            change = update[jid]
+            self.dmaybeupdate('ifolders', {'imapname': imapname}, {'ifolderid': ifolderid})
+            changes = {}
+            if 'name' in change:
+                changes['name'] = change['name']
+            if 'parentId' in change:
+                changes['parentId'] = change['parentId']
+            if 'sortOrder' in change:
+                changes['sortOrder'] = change['sortOrder']
+            self.dmaybedirty('jmailboxes', changes, {'jmailboxid': jid})
+        self.commit()
+        return changed, notchanged
+
+    def destroy_mailboxes(self, destroy, destroyMessages):
+        if not destroy:
+            return [], {}
+        
+        destroyed = []
+        notdestroyed = {}
+        namemap = {}
+        for jid in destroy:
+            old = self.dgetone('ifolders', {'jmailboxid': jid}, 'imapname,ifolderid')
+            if old:
+                if not destroyMessages:
+                    # check if empty
+                    if self.dcount('imessages', {'ifolderid', old['ifolderid']}):
+                        notdestroyed[jid] = {'type': 'mailboxHasEmail'}
+                        continue
+                namemap[old['imapname']] = (jid, old['ifolderid'])
+            else:
+                notdestroyed[jid] = {'type': 'invalidProperties', 'description': 'parent folder not found'}
+        
+        # we reverse so we delete children before parents
+        toremove = {}
+        for oldname in reversed(sorted(namemap.keys())):
+            jid, ifolderid = namemap[oldname]
+            res = self.backend.delete_mailbox(oldname)
+            if res[1] == 'ok':
+                destroyed.append(jid)
+                toremove[jid] = ifolderid
+            else:
+                notdestroyed[jid] = {'type': 'serverError', 'description': res[2]}
+        
+        if toremove:
+            for jid in sorted(toremove.keys()):
+                ifolderid = toremove[jid]
+                self.ddelete('ifolders', {'ifolderid', ifolderid})
+                self.ddupdate('jmailboxes', {'active': 0}, {'jmailboxid': jid})
+            self.commit()
+
+        return destroyed, notdestroyed
+
         
 
 def find_type(message, part):
