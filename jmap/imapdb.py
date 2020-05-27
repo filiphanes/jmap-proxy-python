@@ -4,6 +4,7 @@ import json
 import hashlib
 from collections import defaultdict
 import re
+import imaplib
 
 TAG = 1
 
@@ -49,6 +50,12 @@ KEYWORD2FLAG = (
 )
 
 class ImapDB(DB):
+    def __init__(self):
+        super(self).__init__()
+        config = self.dgetone('iserver')
+        self.imap = imaplib.IMAP4(host='', port=143)
+        
+
     def setuser(self, args):
         # TODO: picture, ...
         self.begin()
@@ -74,21 +81,10 @@ class ImapDB(DB):
 
     def access_data(self):
         return self.dgetone('iserver')
-
-    def backend_cmd(self, cmd, *args, **kwargs):
-        if self.in_transaction():
-            return print('in transaction')
-        if not hasattr(self, 'backend'):
-            config = self.access_data()
-            self.backend = jmap.sync.Standard(config)
-        method = getattr(self.backend, cmd, None)
-        if not method:
-            raise NotImplementedError(f'No such command {cmd}')
-        return method(*args, **kwargs)
     
     def sync_folders(self):
         "Synchronise list from IMAP to local folder cache"
-        prefix, folders = self.backend.folders()
+        prefix, folders = self.imap.folders()
         ifolders = self.dget('ifolders')
         ibylabel = {f['label']: f for f in ifolders}
         seen = set()
@@ -127,7 +123,7 @@ class ImapDB(DB):
         self.commit()
 
         if getstatus:
-            for name, status in self.backend.imap_status(*getstatus.keys()).items():
+            for name, status in self.imap.status(*getstatus.keys()).items():
                 if isinstance(status, 'dict'):
                     self.dmaybeupdate('ifolders', {
                         'uidvalidity': status['uidvalidity'],
@@ -261,7 +257,7 @@ class ImapDB(DB):
     def sync_imap(self):
         rows = self.dget('ifolders').fetchall()
         imapnames = [row['imapname'] for row in rows]
-        status = self.backend.imap_status(imapnames)
+        status = self.imap.status(imapnames)
         for row in data:
             # TODO: better handling of uidvalidity change?
             if status[row['imapname']['uidvalidity']] == row['uidvalidity'] and status[row['imapname']].get('highestmodseq', None) == row['highestmodseq']:
@@ -357,7 +353,7 @@ class ImapDB(DB):
         if not fetches:
             return
         
-        res = self.backend.imap_fetch('imapname', {
+        res = self.imap.fetch('imapname', {
             'uidvalidity': uidvalidity,
             'highestmodseq': highestmodseq,
             'uidnext': uidnext,
@@ -398,7 +394,7 @@ class ImapDB(DB):
             # welcome to the future
             uidnext = res['newstate']['uidnext']
             to = uidnext - 1
-            res = self.backend.imap_count(imapname, uidvalidity, f'{uidfirst}:{to}')
+            res = self.imap.count(imapname, uidvalidity, f'{uidfirst}:{to}')
             rows = self.dbh.execute('SELECT uid FROM imessages WHERE ifolderid = ? AND uid >= ? AND uid <= ?', [ifolderid, uidfirst, to])
             exists = set(res['data'])
             for uid, in rows:
@@ -411,7 +407,7 @@ class ImapDB(DB):
         for item in self.dget('ifolders'):
             frm = item['uidfirst']
             to = item['uidnext'] - 1
-            res = self.backend.imap_search(item['imapname'], 'uid', f'{frm}:{to}', search)
+            res = self.imap.search(item['imapname'], 'uid', f'{frm}:{to}', search)
             if not res[2] == item['uidvalidity']:
                 continue
             for uid in res[3]:
@@ -447,7 +443,7 @@ class ImapDB(DB):
                 flags.add(flag)
         internaldate = time()
         date = strftime(internaldate)
-        appendres = self.backend.imap_append('imapname', '(' + ' '.join(flags) + ')', date, rfc822)
+        appendres = self.imap.append('imapname', '(' + ' '.join(flags) + ')', date, rfc822)
         # TODO: compare appendres[2] with uidvalidity
         uid = appendres[3]
         fdata = jmailmap[mailboxIds[0]]
@@ -516,7 +512,7 @@ class ImapDB(DB):
                         for kw, flag in KEYWORD2FLAG:
                             if flags.pop(kw):
                                 flags.add(flag)
-                        self.backend.imap_update(imapname, uidvalidity, uids, flags)
+                        self.imap.update(imapname, uidvalidity, uids, flags)
 
                 if 'mailboxIds' in action:
                     mboxes = [idmap[k] for k in action['mailboxIds'].keys()]
@@ -537,10 +533,10 @@ class ImapDB(DB):
                             continue
                         # copy from the existing message
                         newfolder = foldermap[ifolderid]['imapname']
-                        self.backend.imap_copy(imapname, uidvalidity, uid, newfolder)
+                        self.imap.copy(imapname, uidvalidity, uid, newfolder)
                     for ifolderid in current:
                         # these ifolderids didn't exist in new, so delete all matching UIDs from these folders
-                        self.backend.imap_move(
+                        self.imap.move(
                             foldermap[ifolderid]['imapname'],
                             foldermap[ifolderid]['uidvalidity'],
                             map[msgid][ifolderid],  # uids
@@ -579,7 +575,7 @@ class ImapDB(DB):
                 for msgid in destroymap[ifolderid]:
                     notdestroyed[msgid] = \
                         {'type': 'notFound', 'description': "No folder"}
-            self.backend.imap_move(ifolder['imapname'], ifolder['uidvalidity'],
+            self.imap.move(ifolder['imapname'], ifolder['uidvalidity'],
                                    destroymap[ifolderid].keys(), None)
             destroyed.extend(destroymap[ifolderid].values())
 
@@ -678,7 +674,7 @@ class ImapDB(DB):
             if not uids or not foldermap[ifolderid]:
                 continue
             imapname, uidvalidity = foldermap[ifolderid]
-            res = self.backend.imap_fill(imapname, uidvalidity, uids)
+            res = self.imap.fill(imapname, uidvalidity, uids)
             for uid in res['data'].keys():
                 rfc822 = res['data'][uid]
                 if rfc822:
@@ -708,7 +704,7 @@ class ImapDB(DB):
             parsed = self.fill_messages(msgid)
             typ = find_type(parsed[msgid], part)
 
-        res = self.backend.imap_getpart(imapname, uidvalidity, uid, part)
+        res = self.imap.getpart(imapname, uidvalidity, uid, part)
         return type, res['data']
     
     def create_mailboxes(self, new):
@@ -779,7 +775,7 @@ class ImapDB(DB):
             if imapname == oldname:
                 changed[jid] = None
                 continue
-            res = self.backend.rename_mailbox(oldname, imapname)
+            res = self.imap.rename_mailbox(oldname, imapname)
             if res[1] == 'ok':
                 changed[jid] = None
                 toupdate[jid] = (imapname, ifolderid)
@@ -824,7 +820,7 @@ class ImapDB(DB):
         toremove = {}
         for oldname in reversed(sorted(namemap.keys())):
             jid, ifolderid = namemap[oldname]
-            res = self.backend.delete_mailbox(oldname)
+            res = self.imap.delete_mailbox(oldname)
             if res[1] == 'ok':
                 destroyed.append(jid)
                 toremove[jid] = ifolderid
@@ -840,7 +836,184 @@ class ImapDB(DB):
 
         return destroyed, notdestroyed
 
+    def create_submission(self, new, idmap):
+        if not new:
+            return {}, {}
         
+        todo = {}
+        createmap = {}
+        notcreated = {}
+        for cid, sub in new.items():
+            msgid = idmap[sub['emailId']]
+            if not msgid:
+                notcreated[cid] = {'error': 'nos msgid provided'}
+                continue
+            thrid = self.dgetfield('jmessages', {'msgid': msgid, 'active': 1}, 'thrid')
+            if not thrid:
+                notcreated[cid] = {'error': 'message does not exist'}
+                continue
+            id = self.dmake('jsubmission', {
+                'sendat': str2time(sub['sendAt']) if sub['sendAt'] else time(),
+                'msgid': msgid,
+                'thrid': thrid,
+                'envelope': json.dumps(sub['envelope']) if 'envelope' in sub else None,
+            })
+            createmap[cid] = {'id': id}
+            todo[cid] = msgid
+        self.commit()
+
+        for cid, sub in todo.items():
+            type, rfc822 = self.get_raw_message(todo[cid])
+            self.imap.send_mail(rfc822, sub['envelope'])
+
+        return createmap, notcreated
+
+    def update_submission(self, changed, idmap):
+        return {}, {x: 'change not supported' for x in changed.keys()}
+
+    def destroy_submission(self, destroy):
+        if not destroy:
+            return [], {}
+        destroyed = []
+        notdestroyed = {}
+        namemap = {}
+        for subid in destroy:
+            active = self.dgetfield('jsubmission', {'jsubid': subid}, 'active')
+            if active:
+                destroy.append(subid)
+                self.ddelete('jsubmission', {'jsubid': subid})
+            else:
+                notdestroyed[subid] = {'type': 'notFound', 'description': 'submission not found'}
+        self.commit()
+        return destroyed, notdestroyed
+    
+    def _initdb(self):
+        super(self)._initdb()
+        # XXX - password encryption?
+        self.dbh.execute("""
+            CREATE TABLE IF NOT EXISTS iserver (
+            username TEXT PRIMARY KEY,
+            password TEXT,
+            imapHost TEXT,
+            imapPort INTEGER,
+            imapSSL INTEGER,
+            imapPrefix TEXT,
+            smtpHost TEXT,
+            smtpPort INTEGER,
+            smtpSSL INTEGER,
+            caldavURL TEXT,
+            carddavURL TEXT,
+            lastfoldersync DATE,
+            mtime DATE NOT NULL
+            )""")
+
+        self.dbh.execute("""
+            CREATE TABLE IF NOT EXISTS ifolders (
+            ifolderid INTEGER PRIMARY KEY NOT NULL,
+            jmailboxid INTEGER,
+            sep TEXT NOT NULL,
+            imapname TEXT NOT NULL,
+            label TEXT,
+            uidvalidity INTEGER,
+            uidfirst INTEGER,
+            uidnext INTEGER,
+            highestmodseq INTEGER,
+            uniqueid TEXT,
+            mtime DATE NOT NULL
+            )""")
+
+        self.dbh.execute("CREATE INDEX IF NOT EXISTS ifolderj ON ifolders (jmailboxid)");
+        self.dbh.execute("CREATE INDEX IF NOT EXISTS ifolderlabel ON ifolders (label)");
+
+
+        self.dbh.execute("""
+            CREATE TABLE IF NOT EXISTS imessages (
+            imessageid INTEGER PRIMARY KEY NOT NULL,
+            ifolderid INTEGER,
+            uid INTEGER,
+            internaldate DATE,
+            modseq INTEGER,
+            flags TEXT,
+            labels TEXT,
+            thrid TEXT,
+            msgid TEXT,
+            envelope TEXT,
+            bodystructure TEXT,
+            size INTEGER,
+            mtime DATE NOT NULL
+            )""")
+
+        self.dbh.execute("CREATE UNIQUE INDEX IF NOT EXISTS imsgfrom ON imessages (ifolderid, uid)");
+        self.dbh.execute("CREATE INDEX IF NOT EXISTS imessageid ON imessages (msgid)");
+        self.dbh.execute("CREATE INDEX IF NOT EXISTS imessagethrid ON imessages (thrid)");
+
+        # not used for Gmail, but it doesn't hurt to have it
+        self.dbh.execute("""
+            CREATE TABLE IF NOT EXISTS ithread (
+            messageid TEXT PRIMARY KEY,
+            sortsubject TEXT,
+            thrid TEXT
+            )""")
+
+        self.dbh.execute("CREATE INDEX IF NOT EXISTS ithrid ON ithread (thrid)");
+
+        self.dbh.execute("""
+            CREATE TABLE IF NOT EXISTS icalendars (
+            icalendarid INTEGER PRIMARY KEY NOT NULL,
+            href TEXT,
+            name TEXT,
+            isReadOnly INTEGER,
+            sortOrder INTEGER,
+            color TEXT,
+            syncToken TEXT,
+            jcalendarid INTEGER,
+            mtime DATE NOT NULL
+            )""")
+
+        self.dbh.execute("""
+            CREATE TABLE IF NOT EXISTS ievents (
+            ieventid INTEGER PRIMARY KEY NOT NULL,
+            icalendarid INTEGER,
+            href TEXT,
+            etag TEXT,
+            uid TEXT,
+            content TEXT,
+            mtime DATE NOT NULL
+            )""")
+
+        self.dbh.execute("CREATE INDEX IF NOT EXISTS ieventcal ON ievents (icalendarid)");
+        self.dbh.execute("CREATE INDEX IF NOT EXISTS ieventuid ON ievents (uid)");
+
+        self.dbh.execute("""
+            CREATE TABLE IF NOT EXISTS iaddressbooks (
+            iaddressbookid INTEGER PRIMARY KEY NOT NULL,
+            href TEXT,
+            name TEXT,
+            isReadOnly INTEGER,
+            sortOrder INTEGER,
+            syncToken TEXT,
+            jaddressbookid INTEGER,
+            mtime DATE NOT NULL
+            )""")
+
+        # XXX - should we store 'kind' in this?  Means we know which j table to update
+        # if someone reuses a UID from a contact to a group or vice versa...
+        self.dbh.execute("""
+            CREATE TABLE IF NOT EXISTS icards (
+            icardid INTEGER PRIMARY KEY NOT NULL,
+            iaddressbookid INTEGER,
+            href TEXT,
+            etag TEXT,
+            uid TEXT,
+            kind TEXT,
+            content TEXT,
+            mtime DATE NOT NULL
+            )""")
+
+        self.dbh.execute("CREATE INDEX IF NOT EXISTS icardbook ON icards (iaddressbookid)");
+        self.dbh.execute("CREATE INDEX IF NOT EXISTS icarduid ON icards (uid)");
+
+        self.dbh.execute("CREATE TABLE IF NOT EXISTS imsgidtodo (msgid TEXT PRIMARY KEY NOT NULL)");
 
 def find_type(message, part):
     if message.get('id', '') == part:
