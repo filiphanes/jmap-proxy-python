@@ -2,10 +2,16 @@ import re
 
 try:
     import orjson as json
+    OPT_INDENT_2 = json.OPT_INDENT_2
 except ImportError:
     import json
+    OPT_INDENT_2 = None
 
 from jmap.api import JmapApi
+from account import AccountManager
+
+accounts = AccountManager()
+
 
 async def app(scope, receive, send):
     assert scope['type'] == 'http'
@@ -23,11 +29,12 @@ async def app(scope, receive, send):
     match = re.match(r'^/jmap/([^/]+)(.*)', scope['path'])
     if match:
         accountid = match.group(1)
-        client = match.group(2)
+        # client = match.group(2)
         data = json.loads(await read_body(receive))
-        api = JmapApi(get_db(accountid))
-        res = await api.handle_request(data)
-        body = json.dumps(res)
+        db = accounts.get_db(accountid)
+        api = JmapApi(db)
+        res = api.handle_request(data)
+        body = json.dumps(res, option=OPT_INDENT_2)
         await response(send, 200, body, [
             [b'content-type', b'application/json'],
             [b'content-length', b'%d' % len(body)],
@@ -53,7 +60,7 @@ async def response(send, status, body, headers=None):
     await send({
         'type': 'http.response.start',
         'status': status,
-        'headers': headers || [
+        'headers': headers or [
             [b'content-type', b'text/plain'],
         ],
     })

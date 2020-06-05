@@ -1,7 +1,10 @@
 import logging as log
 import time
 import re
-import json
+try:
+    import orjson as json
+except ImportError:
+    import json
 
 class AccountNotFound(Exception):
     pass
@@ -64,24 +67,26 @@ class JmapApi:
                 self.push_result('error', error, tag)
                 continue
 
-            if kwargs['ids']:
+            if kwargs.get('ids', None):
                 logbit += " [" + (",".join(kwargs['ids'][:4]))
                 if len(kwargs['ids']) > 4:
                     logbit += ", ..." + len(kwargs['ids'])
                 logbit += "]"
-            if kwargs['properties']:
+            if kwargs.get('properties', None):
                 logbit += " (" + (",".join(kwargs['properties'][:4]))
                 if len(kwargs['properties']) > 4:
                     logbit += ", ..." + len(kwargs['properties'])
                 logbit += ")"
+
             try:
                 result = func(**kwargs)
                 self.push_result(cmd, result, tag)
             except Exception as e:
                 self.push_result('error', {
-                    'type': e.__name__,
+                    'type': e.__class__.__name__,
                     'message': str(e),
                 }, tag)
+                raise e
                 self.rollback()
 
             elapsed = time.monotonic() - t0
@@ -292,6 +297,21 @@ class JmapApi:
             'notFound': [],
         }
 
+    def _mailbox_match(self, item, filter):
+        if 'hasRole' in filter and \
+            bool(filter['hasRole']) != bool(item.get('role', False)):
+            return False
+
+        if 'isSubscribed' in filter and \
+            bool(filter['isSubscribed']) != bool(item.get('isSubscribed', False)):
+            return False
+
+        if 'parentId' in filter and \
+            filter['parentId'] != item.get('parentId', None):
+            return False        
+
+        return True
+
     def api_Mailbox_get(self, accountId=None, ids=None, properties=None, **kwargs):
         self.db.begin()
         user = self.db.get_user()
@@ -305,7 +325,7 @@ class JmapApi:
         if ids:
             want = set(self.idmap(i) for i in ids)
         else:
-            want = set(x['jmailboxid'] for x in data)
+            want = set(d['jmailboxid'] for d in data)
 
         lst = []
         for item in data:
@@ -346,18 +366,15 @@ class JmapApi:
         }
 
     def api_Mailbox_query(self, accountId=None, sort=None, filter=None, position=0, anchor=None, anchorOffset=0, limit=None, **kwargs):
-        self.db.begin()
         user = self.db.get_user()
         if accountId and accountId != self.db.accountid:
-            self.db.rollback()
             raise AccountNotFound()
         data = self.db.dget('jmailboxes', {'active': 1})
-        self.db.commit()
+        if filter:
+            data = [d for d in data if self._mailbox_match(d, filter)]
 
         storage = {'data': data}
-        data = self._mailbox_sort(data, sort, storage)
-        if filter:
-            data = self._mailbox_filter(data, filter, storage)
+        data = _mailbox_sort(data, sort, storage)
 
         start = position
         if anchor:
@@ -376,7 +393,7 @@ class JmapApi:
             'accountId': self.db.accountid,
             'filter': filter,
             'sort': sort,
-            'queryState': user.jstateMailbox,
+            'queryState': user.get('jstateMailbox', None),
             'canCalculateChanges': False,
             'position': start,
             'total': len(data),
@@ -432,12 +449,13 @@ class JmapApi:
         return self.idmap.get(key, key)
 
     def begin(self):
-        "DEPRECATED: use self.db.begin()"
         self.db.begin()
 
     def commit(self):
-        "DEPRECATED: use self.db.commit()"
         self.db.commit()
+
+    def rollback(self):
+        self.db.rollback()
 
     def _transError(self, error):
         "DEPRECATED: use self.db.rollback()"
@@ -478,3 +496,25 @@ def _prop_wanted(args, prop):
     return prop == 'id' \
         or not args['properties'] \
         or prop in args['properties']
+
+def _mailbox_sort(data, sortargs, storage):
+    return data
+    #TODO: make correct sorting
+    def key(item):
+        k = []
+        for arg in sortargs:
+            field = arg['property']
+            if field == 'name':
+                k.append(item['name'])
+            elif field == 'sortOrder':
+                k.append(item['sortOrder'])
+            elif field == 'parent/name':
+                if 'fullnames' not in storage:
+                    storage['fullnames'] = _makefullnames(storage['data'])
+                    k.append(storage['fullnames'][item['jmailboxid']])
+                k.append(item['sortOrder'])
+            else:
+                raise Exception('Unknown field ' + field)
+
+    return sorted(data, key=key)
+

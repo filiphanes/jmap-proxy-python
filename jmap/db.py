@@ -1,9 +1,12 @@
 import os
 import sqlite3
 import time
-import json
 from collections import defaultdict
 import re
+try:
+    import orjson as json
+except ImportError:
+    import json
 
 TABLE2GROUPS = {
   'jmessages': ['Email'],
@@ -23,9 +26,10 @@ TABLE2GROUPS = {
 }
 
 class DB:
-    def __init__(self, accountid):
+    def __init__(self, accountid, path='./data/'):
         self.accountid = accountid
-        self.dbpath = f"/home/jmap/data/{accountid}.db"
+        self.dbpath = os.path.join(path, accountid + '.db')
+        print('Opening dbh', self.dbpath)
         self.dbh = sqlite3.connect(self.dbpath)
         self.dbh.row_factory = sqlite3.Row
         self._initdb()
@@ -33,9 +37,6 @@ class DB:
     def delete(self):
         self.dbh.close()
         os.unlink(self.dbpath)
-    
-    def accountid(self):
-        return self.accountid
     
     def dbh(self):
         if not hasattr(self, 't'):
@@ -56,7 +57,11 @@ class DB:
         if not hasattr(self, 't'):
             print('Not in transaction')
             return
-        mbupdates = self.t.pop('update_mailbox_counts', {})
+        if hasattr(self.t, 'update_mailbox_counts'):
+            mbupdates = self.t.update_mailbox_counts
+            delattr(self.t, 'update_mailbox_counts')
+        else:
+            mbupdates = {}
         for jmailboxid, val in mbupdates.items():
             update = {}
             update['totalEmails'] = self.dbh.execute("""SELECT
@@ -105,7 +110,7 @@ class DB:
     def rollback(self):
         if not self.t:
             return print('Not in transaction')
-        self.t.dbh.rollback()
+        # self.t.rollback()
         self.t = None
     
     # handy for error cases
@@ -131,9 +136,7 @@ class DB:
                 self.user = row
         # bootstrap
         if not self.user:
-            self.user = {
-                'jhighestmodseq': 1,
-            }
+            self.user = {'jhighestmodseq': 1}
             self.dbh.execute("INSERT INTO account (jhighestmodseq) VALUES (?)", [self.user['jhighestmodseq']])
         return self.user
 
@@ -403,7 +406,7 @@ class DB:
         sql = f'SELECT {fields} FROM {table}'
         conditions = []
         values = []
-        for key, val in filter:
+        for key, val in filter.items():
             if type(val) in (tuple, list):
                 conditions.append(f'{key} {val[0]} ?')
                 values.append(val[1])
@@ -412,7 +415,7 @@ class DB:
                 values.append(val)
         if conditions:
             sql += ' WHERE ' + ' AND '.join(conditions)
-        return self.dbh.execute(sql, values)
+        return self.dbh.execute(sql, values).fetchall()
 
     def dcount(self, table, filter={}):
         sql = f'SELECT COUNT(*) FROM {table}'
@@ -433,7 +436,7 @@ class DB:
         data = self.dget(table, filter, fields)
         return {d[hashkey]: d for d in data}
 
-    def dgetone(self, table, filter, fields='*'):
+    def dgetone(self, table, filter={}, fields='*'):
         sql = f'SELECT {fields} FROM {table}'
         conditions = []
         values = []

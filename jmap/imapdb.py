@@ -1,10 +1,14 @@
-from db import DB
+from jmap.db import DB
 from time import time
-import json
 import hashlib
 from collections import defaultdict
 import re
 import imaplib
+import datetime
+try:
+    import orjson as json
+except ImportError:
+    import json
 
 TAG = 1
 
@@ -50,11 +54,22 @@ KEYWORD2FLAG = (
 )
 
 class ImapDB(DB):
-    def __init__(self):
-        super(self).__init__()
+    def __init__(self, accountid, *args, **kwargs):
+        super().__init__(accountid, *args, **kwargs)
         config = self.dgetone('iserver')
-        self.imap = imaplib.IMAP4(host='', port=143)
-        
+        if config:
+            username, password, host, port, *_ = config
+        else:
+            username = accountid
+            password = 'h'
+            host = 'localhost'
+            port = 143
+            # raise Exception('User has no configured IMAP connection')
+        self.imap = imaplib.IMAP4(
+            host=host,
+            port=port,
+            )
+        self.imap.login(username, password)
 
     def setuser(self, args):
         # TODO: picture, ...
@@ -425,7 +440,7 @@ class ImapDB(DB):
         res = self.dmaybeupdate('imessages', {
             'flags': json.dumps([f for f in sorted(flags) if f.lower() != '\\recent']),
             'labels': json.dumps(sorted(labels)),
-        }, {'ifolderid': folderid, 'uid', uid})
+        }, {'ifolderid': ifolderid, 'uid': uid})
         if res:
             msgid = self.dgefield('imessages', {'ifolderid': ifolderid, 'uid': uid}, 'msgid')
             self.mark_sync(msgid)
@@ -888,7 +903,7 @@ class ImapDB(DB):
         return destroyed, notdestroyed
     
     def _initdb(self):
-        super(self)._initdb()
+        super()._initdb()
         # XXX - password encryption?
         self.dbh.execute("""
             CREATE TABLE IF NOT EXISTS iserver (
@@ -905,7 +920,7 @@ class ImapDB(DB):
             carddavURL TEXT,
             lastfoldersync DATE,
             mtime DATE NOT NULL
-            )""")
+            )""" )
 
         self.dbh.execute("""
             CREATE TABLE IF NOT EXISTS ifolders (
