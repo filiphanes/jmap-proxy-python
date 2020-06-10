@@ -3,6 +3,7 @@ import sqlite3
 import time
 from collections import defaultdict
 import re
+from datetime import datetime
 try:
     import orjson as json
 except ImportError:
@@ -33,45 +34,32 @@ class DB:
         self.dbh = sqlite3.connect(self.dbpath)
         self.dbh.row_factory = sqlite3.Row
         self._initdb()
+        self.cursor = self.dbh.cursor()
+        self.cursor.row_factory = sqlite3.Row
+        self.cursor.execute('BEGIN')
+        self.modseq = 0
+        self.tables = {}
+        self.backfilling = False
+        self.updated_mailbox_counts = {}
+        self.change_cb = None
 
     def delete(self):
         self.dbh.close()
         os.unlink(self.dbpath)
     
-    def dbh(self):
-        if not hasattr(self, 't'):
-            print('Not in transaction')
-        else:
-            return self.t
-
-    def in_transaction(self):
-        return hasattr(self, 't')
-
-    def begin(self):
-        if hasattr(self, 't'):
-            print('Already in transaction')
-            return
-        self.t = self.dbh.cursor()
-
     def commit(self):
-        if not hasattr(self, 't'):
-            print('Not in transaction')
-            return
-        if hasattr(self.t, 'update_mailbox_counts'):
-            mbupdates = self.t.update_mailbox_counts
-            delattr(self.t, 'update_mailbox_counts')
-        else:
-            mbupdates = {}
-        for jmailboxid, val in mbupdates.items():
+        for jmailboxid, val in self.updated_mailbox_counts.items():
             update = {}
-            update['totalEmails'] = self.dbh.execute("""SELECT
+            self.cursor.execute("""SELECT
                     COUNT(DISTINCT msgid)
                 FROM jmessages JOIN jmessagemap USING (msgid)
                 WHERE jmailboxid = ?
                   AND jmessages.active = 1
                   AND jmessagemap.active = 1
                 """, [jmailboxid])
-            update['unreadEmails'] = self.dbh.execute("""SELECT
+            update['totalEmails'] = self.cursor.fetchone()[0]
+
+            self.cursor.execute("""SELECT
                     COUNT(DISTINCT msgid)
                 FROM jmessages JOIN jmessagemap USING (msgid)
                 WHERE jmailboxid = ?
@@ -79,7 +67,9 @@ class DB:
                   AND jmessages.active = 1
                   AND jmessagemap.active = 1
                 """, [jmailboxid])
-            update['totalThreads'] = self.dbh.execute("""SELECT
+            update['unreadEmails'] = self.cursor.fetchone()[0]
+
+            self.cursor.execute("""SELECT
                 COUNT(DISTINCT thrid)
                 FROM jmessages JOIN jmessagemap USING (msgid)
                 WHERE jmailboxid = ?
@@ -92,52 +82,47 @@ class DB:
                             AND jmessages.active = 1
                             AND jmessagemap.active = 1)
                 """ , [jmailboxid])
+            update['totalThreads'] = self.cursor.fetchone()[0]
+
             self.dmaybedirty('jmailboxes', update, {'jmailboxid': jmailboxid})
-        if self.t.modseq and self.change_cb:
+        self.updated_mailbox_counts = {}
+
+        if self.modseq and self.change_cb:
             map = {}
-            dbdata = {'jhighestmodseq': self.t.modseq}
-            state = self.t.modseq
-            for table in self.t.tables.keys():
+            dbdata = {'jhighestmodseq': self.modseq}
+            state = self.modseq
+            for table in self.tables.keys():
                 for group in TABLE2GROUPS[table]:
                     map[group] = state
                     dbdata['jstate' + group] = state
             self.dupdate('account', dbdata)
-            if not self.t.backfilling:
+            if not self.backfilling:
                 self.change_cb(self, map, state)
-        self.t.dbh.commit()
-        self.t = None
+        self.cursor.execute('COMMIT')
     
     def rollback(self):
-        if not self.t:
-            return print('Not in transaction')
-        # self.t.rollback()
-        self.t = None
+        self.cursor.execute('ROLLBACK')
     
     # handy for error cases
     def reset(self):
-        if self.t:
-            self.t.dbh.rollback()
-            self.t = None
+        self.cursor.execute('ROLLBACK')
 
     def dirty(self, table):
-        if not self.t.modseq:
+        if not self.modseq:
             user = self.get_user()
-            user.jhighestmodseq += 1
-            self.t.modseq = user.jhighestmodseq
-        self.t.tables[table] = self.t.modseq
-        return self.t.modseq
+            user['jhighestmodseq'] = user['jhighestmodseq'] + 1
+            self.modseq = user['jhighestmodseq']
+        self.tables[table] = self.modseq
+        return self.modseq
 
-    def get_user(self):    
+    def get_user(self):
         if not hasattr(self, 'user'):
-            cursor = self.dbh.cursor()
-            cursor.row_factory = sqlite3.Row
-            self.user = None
-            for row in cursor.execute("SELECT * FROM account LIMIT 1"):
-                self.user = row
+            self.cursor.execute("SELECT * FROM account LIMIT 1")
+            self.user = dict(self.cursor.fetchone())
         # bootstrap
         if not self.user:
             self.user = {'jhighestmodseq': 1}
-            self.dbh.execute("INSERT INTO account (jhighestmodseq) VALUES (?)", [self.user['jhighestmodseq']])
+            self.cursor.execute("INSERT INTO account (jhighestmodseq) VALUES (?)", [self.user['jhighestmodseq']])
         return self.user
 
     def touch_thread_by_msgid(self, msgid):
@@ -199,15 +184,13 @@ class DB:
             table = 'jcalendarprefs'
         
         modseq = self.dirty(table)
-        self.dbh.execute(f"""INSERT INTO {table}
+        self.cursor.execute(f"""INSERT INTO {table}
             (jprefid, payload, jcreated, jmodseq, active) VALUES
             (?,?,?,?,?)""",
             [data['id'], json.dumps(data)], modseq, modseq, 1)
 
     def update_mailbox_counts(self, jmailboxid, jmodseq):
-        if not self.t:
-            return print('Not in transaction')
-        self.t.update_mailbox_counts[jmailboxid] = jmodseq
+        self.updated_mailbox_counts[jmailboxid] = jmodseq
     
     def add_message_to_mailbox(self, msgid, jmailboxid):
         data = {
@@ -276,7 +259,7 @@ class DB:
         for cid, item in args.items():
             mailboxIds = item.pop('mailboxIds', ())
             keywords = item.pop('keywords', ())
-            item['msgdate'] = time()
+            item['msgdate'] = datetime.now()
             item['headers']['Message-ID'] += '<' + new_uuid_string() + '.' + item['msgdate'] + os.getenv('jmaphost')
             message = jmap.EmailObject.make(item, self.get_blob())
             todo[cid] = (message, mailboxIds, keywords)
@@ -314,7 +297,7 @@ class DB:
 
     def put_file(self, accountid, type, content, expires):
         size = len(content)
-        c = self.dbh.execute('INSERT OR REPLACE INTO jfiles (type, size, content, expires) VALUES (?, ?, ?, ?)',
+        c = self.cursor.execute('INSERT OR REPLACE INTO jfiles (type, size, content, expires) VALUES (?, ?, ?, ?)',
             (type, size, content, expires))
         id = c.last_insert_id()
         jmaphost = os.getenv('jmaphost')
@@ -336,38 +319,42 @@ class DB:
         return '(' + ', '.join(args) + ')'
     
     def dinsert(self, table, values):
-        values['mtime'] = time()
-        sql = "INSERT OR REPLACE INTO $table (" + ','.join(values.keys()) + ") VALUES (" + ','.join(["?" for v in values]) + ")"
-        self.dbh.execute(sql, values.values())
-        return self.dbh.last_insert_id
+        values['mtime'] = datetime.now()
+        sql = f"INSERT OR REPLACE INTO {table} (" \
+            + ','.join(values.keys()) \
+            + ") VALUES (" \
+            + ('?,' * len(values))[:-1] + ")"
+        print(sql, values.values())
+        cursor = self.cursor.execute(sql, list(values.values()))
+        return cursor.lastrowid
     
     def dmake(self, table, values, modseqfields=()):
         modseq = self.dirty(table)
-        for field in ('jcreated', 'jmodseq', *modseqfields):
+        values['jcreated'] = modseq
+        values['jmodseq'] = modseq
+        for field in modseqfields:
             values[field] = modseq
         values['active'] = 1
         return self.dinsert(table, values)
 
     def dupdate(self, table, values, filter={}):
-        if not self.t:
-            return print('Not in transaction')
-        values['mtime'] = time()
-        sql = f'UPDATE {table} SET ' + ', '.join([k + '=?' for k in values.keys()])
+        values['mtime'] = datetime.now()
+        sql = f'UPDATE {table} SET ' \
+            + ', '.join([k + '=?' for k in values.keys()])
         if filter:
             sql += ' WHERE ' + ' AND '.join([k + '=?' for k in filter.keys()])
-        self.dbh.execute(sql, values.values() + filter.values())
+        self.cursor.execute(sql, list(values.values()) + list(filter.values()))
     
     def filter_values(self, table, values, filter={}):
-        values = dict(values)
-        sql = 'SELECT' + ','.join(values.keys()) + ' FROM ' + table
+        sql = 'SELECT ' + ','.join(values.keys()) + ' FROM ' + table
         if filter:
             sql += ' WHERE ' + ' AND '.join([k + '=?' for k in filter.keys()])
-        for row in self.dbh.execute(sql, filter.values()):
+        for row in self.cursor.execute(sql, list(filter.values())):
             data = row
         else:
             data = {}
         for key in values.keys():
-            if filter[key] or (data.get(key, None) == values.get(key, None)):
+            if filter.get(key, None) or (data.get(key, None) == values[key]):
                 del values[key]
         return values
 
@@ -394,13 +381,13 @@ class DB:
         sql = f'UPDATE {table} SET active=0, jmodseq=? WHERE active=1'
         if filter:
             sql += ' AND ' + ' AND '.join([k + '=?' for k in filter.keys()])
-        return self.dbh.execute(sql, [modseq] + filter.values())
+        return self.cursor.execute(sql, [modseq] + filter.values())
     
     def ddelete(self, table, filter={}):
         sql = f'DELETE FROM {table}'
         if filter:
             sql += ' WHERE ' + ' AND '.join([k + '=?' for k in filter.keys()])
-        return self.dbh.execute(sql, filter.values())
+        return self.cursor.execute(sql, list(filter.values()))
 
     def dget(self, table, filter={}, fields='*'):
         sql = f'SELECT {fields} FROM {table}'
@@ -415,7 +402,8 @@ class DB:
                 values.append(val)
         if conditions:
             sql += ' WHERE ' + ' AND '.join(conditions)
-        return self.dbh.execute(sql, values).fetchall()
+        self.cursor.execute(sql, values)
+        return self.cursor.fetchall()
 
     def dcount(self, table, filter={}):
         sql = f'SELECT COUNT(*) FROM {table}'
@@ -430,7 +418,8 @@ class DB:
                 values.append(val)
         if conditions:
             sql += ' WHERE ' + ' AND '.join(conditions)
-        return self.dbh.execute(sql, values)
+        self.cursor.execute(sql, values)
+        return self.cursor.fetchone()[0]
 
     def dgetby(self, table, hashkey, filter={}, fields='*'):
         data = self.dget(table, filter, fields)
@@ -440,7 +429,7 @@ class DB:
         sql = f'SELECT {fields} FROM {table}'
         conditions = []
         values = []
-        for key, val in filter:
+        for key, val in filter.items():
             if type(val) in (tuple, list):
                 conditions.append(f'{key} {val[0]} ?')
                 values.append(val[1])
@@ -450,8 +439,8 @@ class DB:
         if conditions:
             sql += ' WHERE ' + ' AND '.join(conditions)
         sql += ' LIMIT 1'
-        for row in self.dbh.execute(sql, values):
-            return row
+        self.cursor.execute(sql, values)
+        return self.cursor.fetchone()
 
     def dgetfield(self, table, filter, field):
         res = self.dgetone(table, filter, field)

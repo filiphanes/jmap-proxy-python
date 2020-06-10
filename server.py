@@ -22,14 +22,13 @@ async def app(scope, receive, send):
             content_type = val
             break
 
-    if content_type != b'application/json':
-        await response(send, 400, b'Only json accepted.')
-        return
-
-    match = re.match(r'^/jmap/([^/]+)(.*)', scope['path'])
-    if match:
-        accountid = match.group(1)
-        # client = match.group(2)
+    match = re.match(r'^/(\w+)/([^/]+)(.*)', scope['path'])
+    cmd = match.group(1)
+    accountid = match.group(2)
+    # client = match.group(3)
+    if cmd == 'jmap':
+        if content_type != b'application/json':
+            return await response(send, 400, b'Need json')
         data = json.loads(await read_body(receive))
         db = accounts.get_db(accountid)
         api = JmapApi(db)
@@ -39,6 +38,13 @@ async def app(scope, receive, send):
             [b'content-type', b'application/json'],
             [b'content-length', b'%d' % len(body)],
         ])
+    elif cmd == 'syncall':
+        db = accounts.get_db(accountid)
+        db.firstsync()
+        db.sync_folders()
+        db.sync_imap()
+        # db.sync_addressbooks()
+        # db.sync_calendars()
     else:
         await response(send, 404, b'404 Path Not found')
 

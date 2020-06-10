@@ -102,9 +102,9 @@ class JmapApi:
     
     def api_UserPreferences_get(self, ids=(), **kwargs):
         user = self.db.get_user()
-        data = self.db.dgetcol('juserprefs', {}, 'payload')
+        payloads = self.db.dgetcol('juserprefs', {}, 'payload')
 
-        lst = [json.loads(j) for j in data]
+        lst = [json.loads(j) for j in payloads]
         if not lst:
             lst = [{
                 'id': 'singleton',
@@ -313,34 +313,33 @@ class JmapApi:
         return True
 
     def api_Mailbox_get(self, accountId=None, ids=None, properties=None, **kwargs):
-        self.db.begin()
         user = self.db.get_user()
         if accountId and accountId != self.db.accountid:
             self.db.rollback()
             raise AccountNotFound()
-        new_state = user.jstateMailbox
-        data = self.db.dget('jmailboxes', {'active': 1})
-        self.db.commit()
+        new_state = user.get('jstateMailbox', None)
+        rows = self.db.dget('jmailboxes', {'active': 1})
 
         if ids:
             want = set(self.idmap(i) for i in ids)
         else:
-            want = set(d['jmailboxid'] for d in data)
+            want = set(d['jmailboxid'] for d in rows)
 
         lst = []
-        for item in data:
-            if not want.pop(item['jmailboxid']):
+        for item in rows:
+            if item['jmailboxid'] not in want:
                 continue
+            want.remove(item['jmailboxid'])
             rec = {
-                'name': item['name'].decode('utf8'),
-                'parentId': item.get('parentId', None),
+                'name': item['name'],
+                'parentId': item['parentId'] or None,
                 'role': item['role'],
-                'sortOrder': item.get('sortOrder', 0),
-                'totalEmails': item.get('totalEmails', 0),
-                'unreadEmails': item.get('unreadEmails', 0),
-                'totalThreads': item.get('totalThreads', 0),
-                'unreadThreads': item.get('unreadThreads', 0),
-                'myRights': {k: bool(item.get(k, False)) for k in (
+                'sortOrder': item['sortOrder'] or 0,
+                'totalEmails': item['totalEmails'] or 0,
+                'unreadEmails': item['unreadEmails'] or 0,
+                'totalThreads': item['totalThreads'] or 0,
+                'unreadThreads': item['unreadThreads'] or 0,
+                'myRights': {k: bool(item[k]) for k in (
                     'mayReadItems',
                     'mayAddItems',
                     'mayRemoveItems',
@@ -351,7 +350,7 @@ class JmapApi:
                     'mayDelete',
                     'maySubmit',
                     )},
-                'isSubscribed': bool(item.get('isSubscribed', False)),
+                'isSubscribed': bool(item['isSubscribed']),
             }
             if properties:
                 rec = {k: rec[k] for k in properties if k in rec}
@@ -369,12 +368,12 @@ class JmapApi:
         user = self.db.get_user()
         if accountId and accountId != self.db.accountid:
             raise AccountNotFound()
-        data = self.db.dget('jmailboxes', {'active': 1})
+        rows = self.db.dget('jmailboxes', {'active': 1})
         if filter:
-            data = [d for d in data if self._mailbox_match(d, filter)]
+            rows = [d for d in rows if self._mailbox_match(d, filter)]
 
-        storage = {'data': data}
-        data = _mailbox_sort(data, sort, storage)
+        storage = {'data': rows}
+        data = _mailbox_sort(rows, sort, storage)
 
         start = position
         if anchor:
@@ -410,9 +409,9 @@ class JmapApi:
         new_state = user.jstateMailbox
         if user.jdeletemodseq and sinceState <= user.jdeletemodseq:
             raise CannotCalculateChanges(f'new_state: {new_state}')
-        data = self.db.dget('jmailboxes', {'jmodseq': ['>', sinceState]})
+        rows = self.db.dget('jmailboxes', {'jmodseq': ['>', sinceState]})
 
-        if maxChanges and len(data) > maxChanges:
+        if maxChanges and len(rows) > maxChanges:
             raise CannotCalculateChanges(f'new_state: {new_state}')
         self.db.commit()
 
@@ -420,7 +419,7 @@ class JmapApi:
         updated = []
         removed = []
         only_counts = 0
-        for item in data:
+        for item in rows:
             if item['active']:
                 if item['jcreated'] <= sinceState:
                     updated.append(item['jmailboxid'])
