@@ -3,7 +3,6 @@ from time import time
 import hashlib
 from collections import defaultdict
 import re
-import imaplib
 from datetime import datetime
 import uuid
 try:
@@ -11,9 +10,11 @@ try:
 except ImportError:
     import json
 
+from imapclient import IMAPClient
+
 TAG = 1
 
-KNOWN_SPECIALS = set(b'\\HasChildren \\HasNoChildren \\NoSelect \\NoInferiors'.split())
+KNOWN_SPECIALS = set(b'\\HasChildren \\HasNoChildren \\NoSelect \\NoInferiors \\UnMarked'.lower().split())
 
 # special use or name magic
 ROLE_MAP = {
@@ -68,11 +69,9 @@ class ImapDB(DB):
             host = 'localhost'
             port = 143
             # raise Exception('User has no configured IMAP connection')
-        self.imap = imaplib.IMAP4(
-            host=host,
-            port=port,
-            )
+        self.imap = IMAPClient(host, port, use_uid=True, ssl=False)
         self.imap.login(username, password)
+        print('Login', username, password)
 
     def setuser(self, args):
         # TODO: picture, ...
@@ -102,7 +101,6 @@ class ImapDB(DB):
     
     def sync_folders(self):
         "Synchronise list from IMAP to local folder cache"
-        typ, lines = self.imap.list()
         ifolders = self.dget('ifolders')
         ibylabel = {f['label']: f for f in ifolders}
         seen = set()
@@ -110,13 +108,13 @@ class ImapDB(DB):
         getuniqueid = {}
 
         prefix = ''
-        for line in lines:
-            match = re.match(rb'\(([^)]*)\)\s+"(.)"\s+(.+)', line)
-            if not match: continue
-            roles = [flag for flag in match.group(1).split() if flag not in KNOWN_SPECIALS]
-            label = roles[0].decode() if roles else None
-            sep = match.group(2).decode()
-            name = match.group(3).decode()
+        for flags, sep, name in self.imap.list_folders():
+            sep = sep.decode()
+            roles = [f for f in flags if f.lower() not in KNOWN_SPECIALS]
+            if roles:
+                label = roles[0].decode()
+            else:
+                label = name
             if label in ibylabel:
                 folder = ibylabel[label]
                 id = folder['ifolderid']
@@ -146,19 +144,13 @@ class ImapDB(DB):
             'imapPrefix': prefix,
             'lastfoldersync': datetime.now(),
         })
-        self.commit()
+        # self.commit()
 
         for name, id in getstatus.items():
-            typ, lines = self.imap.status(name, '(uidvalidity uidnext highestmodseq)')
-            for line in lines:
-                match = re.match(rb'[^(]+\(([^)]+)\)', line)
-                res = match.group(1).split()
-                status = {}
-                for i in range(0, 3*2, 2):  # 3 requested values
-                    status[res[i].lower().decode()] = int(res[i + 1])
-                status['uidfirst'] = status['uidnext']
-                self.dmaybeupdate('ifolders', status, {'ifolderid': id})
-            self.commit()
+            status = self.imap.folder_status(name, ['uidvalidity','uidnext','highestmodseq'])
+            status['uidfirst'] = status['uidnext']
+            self.dmaybeupdate('ifolders', status, {'ifolderid': id})
+        self.commit()
         self.sync_jmailboxes()
 
     def sync_jmailboxes(self):
@@ -177,6 +169,7 @@ class ImapDB(DB):
         
         seen = set()
         for folder in ifolders:
+            print(list(folder))
             if (folder['label'] or '').lower() == '\\allmail':
                 # we dont show this folder
                 continue
@@ -195,7 +188,7 @@ class ImapDB(DB):
             parentId = ''
             name = None
             if role:
-                sortOrder = 3
+                sortOrder = 2
             elif role == 'inbox':
                 sortOrder = 1
             else:
@@ -238,7 +231,7 @@ class ImapDB(DB):
                 'active': 1,
             }
             if id:
-                if role and roletoid[role] and roletoid[role] != id:
+                if role and role in roletoid and roletoid[role] != id:
                     # still gotta move it
                     id = roletoid[role]
                     self.dmaybedirty('jmailboxes', details, {'jmailboxid': id}, ['jnoncountsmodseq'])
@@ -271,39 +264,30 @@ class ImapDB(DB):
         self.commit()
 
     def labels(self):
-        rows = self.dget('ifolders', {}, 'ifolderid,jmailboxid,imapname')
-        return {row['label']: row for row in rows}
+        self.cursor.execute('SELECT label,ifolderid,jmailboxid,imapname FROM ifolders')
+        return {label: (ifolderid, jmailboxid, imapname) for label, ifolderid, jmailboxid, imapname in self.cursor}
     
     def sync_imap(self):
-        rows = self.dget('ifolders')
-        imapnames = [row['imapname'] for row in rows]
-        for row in rows:
-            ok, lines = self.imap.status(row['imapname'], "(uidvalidity highestmodseq)")
-            for line in lines:
-                res = re.match(rb'[^(]+\(([^)]+)\)', line).group(1).split()
-                status = {res[i].lower().decode(): int(res[i+1]) for i in (0, 2)}
+        self.cursor.execute('SELECT ifolderid,label,imapname,uidvalidity,highestmodseq FROM ifolders')
+        rows = self.cursor.fetchall()
+        for ifolderid, label, imapname, uidvalidity, highestmodseq in rows:
+            status = self.imap.folder_status(imapname, ['uidvalidity', 'highestmodseq'])
             # TODO: better handling of uidvalidity change?
-            if status['uidvalidity'] == row['uidvalidity'] and \
-               status['highestmodseq'] == row['highestmodseq']:
+            if status['uidvalidity'] == uidvalidity and \
+               status['highestmodseq'] == highestmodseq:
                 continue
-            label = row['label'] or ''
-            if label.lower() == '\\allmail':
-                label = None 
-            self.do_folder(row['ifolderid'], label)
+            self.do_folder(ifolderid, label)
         self.sync_jmap()
 
     def backfill(self):
         rest = 500
-        rows = self.dget('ifolders', {
-            'uidnext': ('>', 1),
-            'uidfirst': ('>', 1),
-        }, 'ifolderid,label')
+        self.cursor.execute('SELECT ifolderid, label FROM ifolders'
+                            ' WHERE uidnext > 1 AND uidfirst > 1')
+        rows = self.cursor.fetchall()
 
         if rows:
-            for id, label in rows:
-                if label.lower() == '\\allmail':
-                    label = None
-                rest -= self.do_folder(id, label, rest)
+            for ifolderid, label in rows:
+                rest -= self.do_folder(ifolderid, label, rest)
                 if rest < 10:
                     break
             self.sync_jmap()
@@ -311,11 +295,10 @@ class ImapDB(DB):
     
     def firstsync(self):
         self.sync_folders()
-        rows = self.dget('ifolders')
-        for row in rows:
-            if row['imapname'].lower() == 'inbox':
-              self.do_folder(row['ifolderid'], row['label'], 50)
-              break
+        self.cursor.execute('SELECT ifolderid, label FROM ifolders'
+                            ' WHERE UPPER(imapname) = "INBOX" LIMIT 1')
+        for ifolderid, label in self.cursor.fetchall():
+            self.do_folder(ifolderid, label, 50)
         self.sync_jmap()
     
     def calclabels(self, forcelabel, row):
@@ -327,85 +310,121 @@ class ImapDB(DB):
             print(f'No way to calculate labels for {row}')
     
     def calcmsgid(self, imapname, uid, msg):
-        if 'digest.sha1' in msg and 'cid' in msg:
-            return msg['digest.sha1'], msg['cid']
-        
-        envelope = msg['envelope']
+        envelope = msg[b'ENVELOPE']
         coded = json.dumps([envelope])
         base = hashlib.sha1(coded).hexdigest()[:9]
         msgid = 'm' + base
-        replyto = envelope.get('In-Reply-To', '').trim()
-        messageid = envelope.get('Message-ID', '').trim()
-        encsub = envelope.get('Subject', '')
+        in_reply_to = (envelope['In-Reply-To'] or '').strip()
+        messageid = (envelope['Message-ID'] or '').strip()
+        encsub = (envelope['Subject'] or '')
         try:
             encsub = encsub.decode('MIME-Header')
         except Exception:
             pass
         sortsub = _normalsubject(encsub)
-        rows = self.dbh.execute('SELECT DISTINCT thrid FROM ithread'
+        self.cursor.execute('SELECT DISTINCT thrid FROM ithread'
                ' WHERE messageid IN (?,?) AND sortsubject=? LIMIT 1',
-               (replyto, messageid, sortsub))
+               (in_reply_to, messageid, sortsub))
         try:
-            thrid = rows.fetchone()[0]
+            thrid, = self.cursor.fetchone()
         except Exception:
             thrid = 't' + base
-        for id in (replyto, messageid):
+        for id in (in_reply_to, messageid):
             if id:
                 self.dbh.execute('INSERT OR IGNORE INTO ithread (messageid, thrid, sortsubject) VALUES (?,?,?)', (id, thrid, sortsub))
         return msgid, thrid
     
     def do_folder(self, ifolderid, forcelabel, batchsize=0):
-        data = self.dgetone('ifolders', {'ifolderid': ifolderid})
+        self.cursor.execute("SELECT imapname, uidfirst, uidnext, uidvalidity, highestmodseq FROM ifolders WHERE ifolderid=?", [ifolderid])
+        data = self.cursor.fetchone()
         if not data:
             return print(f'NO SUCH FOLDER {ifolderid}')
-        imapname = data['imapname']
-        uidfirst = data['uidfirst'] or 1
-        uidnext = data['uidnext']
-        uidvalidity = data['uidvalidity']
-        highestmodseq = data['highestmodseq']
-        fetches = {}
-        if batchsize:
-            if uidfirst > 1:
-                end = uidfirst - 1
-                uidfirst -= batchsize
-                if uidfirst < 1:
-                    uidfirst = 1
-                fetches['backfill'] = (uidfirst, end, 1)
-        else:
-            fetches['new'] = (uidnext, '*', 1)
-            fetches['update'] = (uidfirst, uidnext - 1, 0, highestmodseq)
-        if not fetches:
-            return
-        
-        res = self.imap.fetch('imapname', {
+
+        imapname, uidfirst, uidnext, uidvalidity, highestmodseq = data
+        uidfirst = uidfirst or 1
+        highestmodseq = 0 # comment in production
+        fetch_data = 'UID FLAGS INTERNALDATE ENVELOPE RFC822.SIZE'.split()
+        fetch_modifiers = (f'CHANGEDSINCE {highestmodseq}',)
+
+        oldstate = {
             'uidvalidity': uidvalidity,
             'highestmodseq': highestmodseq,
             'uidnext': uidnext,
-        }, fetches)
+        }
 
-        if res['newstate']['uidvalidity'] != uidvalidity:
+        res = self.imap.select_folder(imapname, readonly=True)
+        exists = int(res[b'EXISTS'])
+        uidvalidity = int(res[b'UIDVALIDITY'])
+        uidnext = int(res[b'UIDNEXT'])
+        highestmodseq = int(res[b'HIGHESTMODSEQ'])
+        
+        newstate = {
+            'uidvalidity': uidvalidity,
+            'highestmodseq': highestmodseq,
+            'uidnext': uidnext,
+            'exists': exists,
+        }
+
+        if not batchsize:
+            new = self.imap.fetch((oldstate['uidnext'],'*'), fetch_data,fetch_modifiers)
+            update = self.imap.fetch((uidfirst, oldstate['uidnext']-1), ('UID', 'FLAGS'))
+            backfill = {}
+        elif uidfirst > 1:
+            end = uidfirst - 1
+            uidfirst = max(uidfirst - batchsize, 1)
+            new = {}
+            update = {}
+            self.backfilling = True
+            backfill = self.imap.fetch((uidfirst, end), fetch_data, fetch_modifiers)
+        else:
+            return
+        print('fetch_data:', fetch_data)
+        print('new:', new)
+        print('update:', update)
+        print('backfill:', backfill)
+
+        if oldstate['uidvalidity'] != uidvalidity:
+            raise Exception(f"UIDVALIDITY CHANGED {imapname}: {oldstate['uidvalidity']} => {uidvalidity}")
+
+        if newstate['uidvalidity'] != uidvalidity:
             # going to want to nuke everything for the existing folder and create this  - but for now, just die
-            raise Exception(f"UIDVALIDITY CHANGED {imapname}: {uidvalidity} => res['newstate']['uidvalidity'] {data}")
+            raise Exception(f"UIDVALIDITY CHANGED {imapname}: {uidvalidity} => {newstate['uidvalidity']}")
             
         self.begin()
-        if batchsize:
-            self.backfilling = True
         didold = 0
-        for uid, msg in res['backfill'][1].items():
+        for uid, msg in backfill.items():
+            e = msg[b'ENVELOPE']
+            print(e.reply_to)
+            msg[b'ENVELOPE'] = {
+                'Date': e.date,
+                'Subject': e.subject and e.subject.decode(),
+                'Sender': e.sender and ['"{0}" <{2}@{3}>'.format(*a) for a in e.sender],
+                'Reply-To': e.reply_to and ['"{0}" <{2}@{3}>'.format(*a) for a in e.reply_to],
+                'From': e.from_ and ['"{0}" <{2}@{3}>'.format(*a) for a in e.from_],
+                'To': e.to and ['"{0}" <{2}@{3}>'.format(*a) for a in e.to],
+                'Cc': e.cc and ['"{0}" <{2}@{3}>'.format(*a) for a in e.cc],
+                'Bcc': e.bcc and ['"{0}" <{2}@{3}>'.format(*a) for a in e.bcc],
+                'In-Reply-To': e.in_reply_to and e.in_reply_to.decode(),
+                'Message-ID': e.message_id and e.message_id.decode(),
+            }
             msgid, thrid = self.calcmsgid(imapname, uid, msg)
             labels = self.calclabels(forcelabel, msg)
             didold += 1
-            self.new_record(ifolderid, uid, msg['flags'], labels, msg['envelope'], strptime(msg['internaldate']), msgid, thrid, msg['rfc822.size'])
+            self.new_record(ifolderid, uid, msg[b'FLAGS'], labels, msg[b'ENVELOPE'], msg[b'INTERNALDATE'], msgid, thrid, msg[b'RFC822.SIZE'])
         
-        for uid, msg in res['new'][1]:
+        for uid, msg in update.items():
+            labels = self.calclabels(forcelabel, msg)
+            self.changed_record(ifolderid, uid, msg[b'FLAGS'], labels)
+
+        for uid, msg in new.items():
             msgid, thrid = self.calcmsgid(imapname, uid, msg)
             labels = self.calclabels(forcelabel, msg)
-            self.new_record(ifolderid, uid, msg['flags'], labels, msg['envelope'], strptime(msg['internaldate']), msgid, thrid, msg['rfc822.size'])
+            self.new_record(ifolderid, uid, msg[b'FLAGS'], labels, msg[b'ENVELOPE'], msg[b'INTERNALDATE'], msgid, thrid, msg[b'RFC822.SIZE'])
 
         self.dupdate('ifolders', {
-            'highestmodseq': res['newstate']['highestmodseq'],
+            'highestmodseq': newstate['highestmodseq'],
             'uidfirst': uidfirst,
-            'uidnext': res['newstate']['uidnext'],
+            'uidnext': newstate['uidnext'],
         }, {'ifolderid': ifolderid})
         self.commit()
 
@@ -414,16 +433,17 @@ class ImapDB(DB):
         self.cursor.execute('SELECT COUNT(*) FROM imessages WHERE ifolderid=?', [ifolderid])
         count, = self.cursor.fetchone()
 
-        if uidfirst != 1 or count != res['newstate']['exists']:
+        if uidfirst != 1 or count != newstate['exists']:
             # welcome to the future
-            uidnext = res['newstate']['uidnext']
+            uidnext = newstate['uidnext']
             to = uidnext - 1
-            res = self.imap.count(imapname, uidvalidity, f'{uidfirst}:{to}')
-            self.cursor.execute('SELECT uid FROM imessages WHERE ifolderid = ? AND uid >= ? AND uid <= ?', [ifolderid, uidfirst, to])
-            exists = set(res['data'])
-            for uid, in self.cursor:
+            exists = self.imap.search(['UID', f'{uidfirst}:{to}'])
+            exists = set(exists)
+            self.cursor.execute('SELECT msgid, uid FROM imessages WHERE ifolderid = ? AND uid >= ? AND uid <= ?', [ifolderid, uidfirst, to])
+            for msgid, uid in self.cursor:
                 if uid not in exists:
-                    self.deleted_record(ifolderid, uid)
+                    self.ddelete('imessages', {'ifolderid': ifolderid, 'uid': uid})
+                    self.mark_sync(msgid)
             self.commit()
     
     def imap_search(self, *search):
@@ -614,7 +634,7 @@ class ImapDB(DB):
     def new_record(self, ifolderid, uid, flags, labels, envelope, internaldate, msgid, thrid, size):
         self.dinsert('imessages', {
             'ifolderid': ifolderid,
-            'flags': json.dumps([f for f in flags if f.lower() != '\\recent']),
+            'flags': json.dumps([f.decode() for f in flags if f.lower() != b'\\recent']),
             'labels': json.dumps(sorted(labels)),
             'internaldate': internaldate,
             'msgid': msgid,
@@ -627,9 +647,11 @@ class ImapDB(DB):
     def sync_jmap_msgid(self, msgid):
         labels = set()
         flags = set()
-        for row in self.dget('imessages', {'msgid': msgid}, 'flags,labels'):
-            flags.update(json.loads(row['flags']))
-            labels.update(json.loads(row['labels']))
+        self.cursor.execute('SELECT flags,labels FROM imessages WHERE msgid=?', [msgid])
+        for f, l in self.cursor:
+            print(f, l)
+            flags.update(json.loads(f))
+            labels.update(json.loads(l))
 
         keywords = {}
         for flag in flags:
@@ -642,6 +664,7 @@ class ImapDB(DB):
                     keywords[flag] = True
         
         slabels = self.labels()
+        print(labels)
         jmailboxids = [slabels[l][1] for l in labels]
 
         if not jmailboxids:
@@ -663,19 +686,20 @@ class ImapDB(DB):
             }, jmailboxids)
 
     def sync_jmap(self):
-        for msgid in self.dgetcol('imsgidtodo', {}, 'msgid'):
-            self.sync_jmap_msgid()
-            self.ddelete('imsgidtodo', {'msgid': msgid})
+        self.cursor.execute('SELECT msgid FROM imsgidtodo')
+        msgids = [i for i, in self.cursor]
+        for msgid in msgids:
+            self.sync_jmap_msgid(msgid)
+            self.cursor.execute('DELETE imsgidtodo WHERE msgid=?', [msgid])
 
     def fill_messages(self, ids):
         if not ids:
             return
         ids = set(ids)
-        rows = self.dbh.execute('SELECT msgid, parsed FROM jrawmessage WHERE msgid IN (' + ('?,' * len(ids))[:-1] + ')')
-        result = {}
-        for msgid, parsed in rows:
-            result[msgid] = json.loads(parsed)
+        self.cursor.execute('SELECT msgid, parsed FROM jrawmessage'
+            ' WHERE msgid IN (' + ('?,' * len(ids))[:-1] + ')', ids)
 
+        result = {msgid: json.loads(parsed) for msgid, parsed in self.cursor}
         need = ids.difference(result.keys())
         udata = defaultdict(dict)
         if need:
@@ -688,7 +712,7 @@ class ImapDB(DB):
             uids = ','.join(u for u in uhash.keys() if u not in result[u])
             if uids:
                 foldermap[ifolderid] = self.dgetone('ifolders', {'ifolderid': ifolderid}, 'imapname,uidvalidity')
-        
+
         if not udata:
             return result
         
@@ -720,7 +744,8 @@ class ImapDB(DB):
         return result
 
     def get_raw_message(self, msgid, part):
-        imapname, uidvalidity, uid = self.dhh.execute('SELECT imapname,uidvalidity,uid FROM ifolders JOIN imessages USING (ifolderid) WHERE msgid=?', [msgid])
+        self.cursor.execute('SELECT imapname,uidvalidity,uid FROM ifolders JOIN imessages USING (ifolderid) WHERE msgid=?', [msgid])
+        imapname, uidvalidity, uid = self.cursor.fetchone()
         if not imapname:
             return None
         typ = 'message/rfc822'
@@ -1078,5 +1103,5 @@ def _envelopedata(data='{}'):
 
 
 def _trimh(val):
-    "DEPRECATED: Use directly val.trim()"
-    return val.trim()
+    "DEPRECATED: Use directly val.strip()"
+    return val.strip()

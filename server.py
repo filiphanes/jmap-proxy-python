@@ -38,13 +38,17 @@ async def app(scope, receive, send):
             [b'content-type', b'application/json'],
             [b'content-length', b'%d' % len(body)],
         ])
-    elif cmd == 'syncall':
+    elif cmd == 'firstsync':
         db = accounts.get_db(accountid)
         db.firstsync()
+        await response(send, 200, b'Synced')
+    elif cmd == 'syncall':
+        db = accounts.get_db(accountid)
         db.sync_folders()
         db.sync_imap()
         # db.sync_addressbooks()
         # db.sync_calendars()
+        await response(send, 200, b'Synced')
     else:
         await response(send, 404, b'404 Path Not found')
 

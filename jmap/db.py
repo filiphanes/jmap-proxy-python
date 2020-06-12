@@ -36,7 +36,7 @@ class DB:
         self._initdb()
         self.cursor = self.dbh.cursor()
         self.cursor.row_factory = sqlite3.Row
-        self.cursor.execute('BEGIN')
+        self.cursor.execute('BEGIN DEFERRED')
         self.modseq = 0
         self.tables = {}
         self.backfilling = False
@@ -47,7 +47,18 @@ class DB:
         self.dbh.close()
         os.unlink(self.dbpath)
     
+    def begin(self):
+        if not self.dbh.in_transaction:
+            self.cursor.execute("BEGIN DEFERRED")
+            self.in_transaction = True
+        else:
+            print('Already in transaction')
+    
     def commit(self):
+        if not self.dbh.in_transaction:
+            print('Not in transaction')
+            return
+
         for jmailboxid, val in self.updated_mailbox_counts.items():
             update = {}
             self.cursor.execute("""SELECT
@@ -101,10 +112,16 @@ class DB:
         self.cursor.execute('COMMIT')
     
     def rollback(self):
+        if not self.dbh.in_transaction:
+            print('Not in transaction')
+            return
         self.cursor.execute('ROLLBACK')
     
     # handy for error cases
     def reset(self):
+        if not self.dbh.in_transaction:
+            print('Not in transaction')
+            return
         self.cursor.execute('ROLLBACK')
 
     def dirty(self, table):
