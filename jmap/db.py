@@ -135,7 +135,8 @@ class DB:
     def get_user(self):
         if not hasattr(self, 'user'):
             self.cursor.execute("SELECT * FROM account LIMIT 1")
-            self.user = dict(self.cursor.fetchone())
+            row = self.cursor.fetchone()
+            self.user = dict(row) if row else row
         # bootstrap
         if not self.user:
             self.user = {'jhighestmodseq': 1}
@@ -143,9 +144,13 @@ class DB:
         return self.user
 
     def touch_thread_by_msgid(self, msgid):
-        thrid = self.dgetfield('jmessages', {'msgid': msgid}, 'thrid')
-        if not thrid: return
-        messages = self.dget('jmessages', {'thrid': thrid, 'active': 1})
+        self.cursor.execute("SELECT thrid FROM jmessages WHERE msgid=?", [msgid])
+        row = self.cursor.fetchone()
+        if not row:
+            return
+        thrid = row[0]
+        self.cursor.execute("SELECT msgid,isDraft,msginreplyto,msgmessageid FROM jmessages WHERE thrid=? AND active=1", [thrid])
+        messages = self.cursor.fetchall()
         if not messages:
             self.dmaybedirty('jthreads', {'active': 0, 'data': '[]'}, {'thrid': thrid})
             return
@@ -172,8 +177,8 @@ class DB:
             msgs.append(msg['msgid'])
             seenmsgs.add(msg['msgid'])
         # have to handle doesn't exist case dammit, dmaybdirty isn't good for that
-        exists = self.dgetfield('jtreads', {'thrid': thrid}, 'jcreated')
-        if exists:
+        self.cursor.execute("SELECT jcreated FROM jthreads WHERE thrid=?", [thrid])
+        if self.cursor.fetchone():
             self.dmaybedirty('jthreads',
                              {'active': 1, 'data': json.dumps(msgs)},
                              {'thrid': thrid})
@@ -461,7 +466,7 @@ class DB:
 
     def dgetfield(self, table, filter, field):
         res = self.dgetone(table, filter, field)
-        return res.get(field, None)
+        return res.get(field, None) if res else res
     
     def dgetcol(self, table, filter={}, field=0):
         return [row[field] for row in self.dget(table, filter, field)]

@@ -442,6 +442,57 @@ class JmapApi:
             'changedProperties': ["totalEmails", "unreadEmails", "totalThreads", "unreadThreads"] if only_counts else None,
         }
 
+    def api_Email_query(self, accountId, position=None, anchor=None,
+                        anchorOffset=None, sort={}, filter={},
+                        collapseThreads=False, limit=10):
+        user = self.db.get_user()
+        if accountId and accountId != self.db.accountid:
+            raise AccountNotFound()
+        newQueryState = user['jstateEmail']
+        if position is not None and anchor is not None:
+            raise ValueError('invalid arguments')
+        # anchor and anchorOffset must go together
+        if (anchor is None) != (anchorOffset is None):
+            raise ValueError('invalid arguments')
+        
+        start = position or 0
+        if start < 0:
+            raise ValueError('invalid arguments')
+        rows = self.db.dget('jmessages', {'active': 1})
+        for row in rows:
+            row['keywords'] = json.decode(row['keywords'] or '{}')
+        storage = {'data': rows}
+        rows = _post_sort(rows, sort, storage)
+        if filter:
+            rows = _messages_filter(rows, filter, storage)
+        if collapseThreads:
+            rows = _collapseThreads(rows)
+        
+        if anchor:
+            # need to calculate position
+            for i, row in enumerate(rows):
+                if row['msgid'] == anchor:
+                    start = max(i + anchorOffset, 0)
+                    break
+            else:
+                raise Exception('anchor not found')
+
+        end = start + limit if limit else len(rows)
+        if end > len(rows):
+            end = len(rows)
+        
+        return {
+            'accountId': self.db.accountid,
+            'filter': filter,
+            'sort': sort,
+            'collapseThreads': collapseThreads,
+            'queryState': newQueryState,
+            'canCalculateChanges': True,
+            'position': start,
+            'total': len(rows),
+            'ids': [rows[i]['msgid'] for i in range(start, end)],
+        }
+    
     def idmap(self, key):
         if not key:
             return
