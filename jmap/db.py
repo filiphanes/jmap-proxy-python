@@ -4,6 +4,7 @@ import time
 from collections import defaultdict
 import re
 from datetime import datetime
+import uuid
 try:
     import orjson as json
 except ImportError:
@@ -282,7 +283,7 @@ class DB:
             mailboxIds = item.pop('mailboxIds', ())
             keywords = item.pop('keywords', ())
             item['msgdate'] = datetime.now()
-            item['headers']['Message-ID'] += '<' + new_uuid_string() + '.' + item['msgdate'] + os.getenv('jmaphost')
+            item['headers']['Message-ID'] += '<' + str(uuid.uuid4()) + '.' + item['msgdate'] + os.getenv('jmaphost')
             message = jmap.EmailObject.make(item, self.get_blob())
             todo[cid] = (message, mailboxIds, keywords)
         
@@ -337,7 +338,7 @@ class DB:
         if data:
             return data['type'], data['content']
 
-    def _dbl(*args):
+    def _dbl(self, *args):
         return '(' + ', '.join(args) + ')'
     
     def dinsert(self, table, values):

@@ -11,6 +11,7 @@ except ImportError:
     import json
 
 from imapclient import IMAPClient
+from jmap import email
 
 TAG = 1
 
@@ -490,7 +491,7 @@ class ImapDB(DB):
             if flags.pop(kw):
                 flags.add(flag)
         internaldate = time()
-        date = strftime(internaldate)
+        date = datetime.fromisoformat()(internaldate)
         appendres = self.imap.append('imapname', '(' + ' '.join(flags) + ')', date, rfc822)
         # TODO: compare appendres[2] with uidvalidity
         uid = appendres[3]
@@ -506,7 +507,7 @@ class ImapDB(DB):
         if not msgdata:
             raise Exception('Failed to get back stored message from imap server')
         # save us having to download it again - drop out of transaction so we don't wait on the parse
-        message = jmap.EmailObject.parse(rfc822, msgdata['msgid'])
+        message = email.parse(rfc822, msgdata['msgid'])
         self.begin()
         self.dinsert('jrawmessage', {
             'msgid': msgdata['msgid'],
@@ -638,6 +639,7 @@ class ImapDB(DB):
     def new_record(self, ifolderid, uid, flags, labels, envelope, internaldate, msgid, thrid, size):
         self.dinsert('imessages', {
             'ifolderid': ifolderid,
+            'uid': uid,
             'flags': json.dumps([f.decode() for f in flags if f.lower() != b'\\recent']),
             'labels': json.dumps(sorted(labels)),
             'internaldate': internaldate,
@@ -700,66 +702,64 @@ class ImapDB(DB):
     def fill_messages(self, ids):
         if not ids:
             return
-        ids = set(ids)
         self.cursor.execute('SELECT msgid, parsed FROM jrawmessage'
             ' WHERE msgid IN (' + ('?,' * len(ids))[:-1] + ')', ids)
-
+        
+        ids = set(ids)
         result = {msgid: json.loads(parsed) for msgid, parsed in self.cursor}
         need = ids.difference(result.keys())
         udata = defaultdict(dict)
         if need:
-            uids = self.dbh.execute('SELECT ifolderid, uid, msgid FROM imessages WHERE msgid IN (' + ('?,' * len(need))[:-1] + ')')
-            for ifolderid, uid, msgid in uids:
+            self.cursor.execute('SELECT ifolderid, uid, msgid FROM imessages WHERE msgid IN (' + ('?,' * len(need))[:-1] + ')',
+                list(need))
+            for ifolderid, uid, msgid in self.cursor:
                 udata[ifolderid][uid] = msgid
         
         foldermap = {}
         for ifolderid, uhash in udata.items():
-            uids = ','.join(u for u in uhash.keys() if u not in result[u])
-            if uids:
-                foldermap[ifolderid] = self.dgetone('ifolders', {'ifolderid': ifolderid}, 'imapname,uidvalidity')
+            for msgid in uhash.values():
+                if msgid not in result:
+                    foldermap[ifolderid] = self.dgetone('ifolders', {'ifolderid': ifolderid}, 'imapname,uidvalidity')
+                    break
 
         if not udata:
             return result
         
-        parsed = {}
         for ifolderid, uhash in udata.items():
-            uids = ','.join(u for u in uhash.keys() if u not in result[u])
-            if not uids or not foldermap[ifolderid]:
-                continue
+            if ifolderid not in foldermap: continue
+            uids = ','.join(str(u) for u,i in uhash.items() if i not in result)
+            if not uids: continue
             imapname, uidvalidity = foldermap[ifolderid]
-            res = self.imap.fill(imapname, uidvalidity, uids)
-            for uid in res['data'].keys():
-                rfc822 = res['data'][uid]
-                if rfc822:
-                    msgid = uhash[uid]
-                    if msgid not in result:
-                        result[msgid] = parsed[msgid] = jmap.EmailObject.parse(rfc822, msgid)
-        
-        self.begin()
-        for msgid, message in parsed.items():
-            self.dinsert('jrawmessage', {
-                'msgid': msgid,
-                'parsed': json.dumps(message),
-                'hasAttachment': message.get('hasAttachment', False),
-            })
+            res = self.imap.select_folder(imapname, readonly=True)
+            if res[b'UIDVALIDITY'] != uidvalidity:
+                raise Warning('UIDVALIDITY dont matches for ' + imapname)
+            res = self.imap.fetch(uids, ['RFC822'])
+            for uid, data in res.items():
+                msgid = uhash[uid]
+                result[msgid] = email.parse(data[b'RFC822'])
+                self.cursor.execute("INSERT OR REPLACE INTO jrawmessage (msgid,parsed,hasAttachment VALUES (?,?,?)", [
+                    msgid,
+                    json.dumps(result[msgid]),
+                    result[msgid].get('hasAttachment', False),
+                    ])
         self.commit()
 
         # XXX - handle not getting data that we need?
         # stillneed = ids.difference(result.keys())
         return result
 
-    def get_raw_message(self, msgid, part):
+    def get_raw_message(self, msgid, part=None):
         self.cursor.execute('SELECT imapname,uidvalidity,uid FROM ifolders JOIN imessages USING (ifolderid) WHERE msgid=?', [msgid])
         imapname, uidvalidity, uid = self.cursor.fetchone()
         if not imapname:
             return None
         typ = 'message/rfc822'
         if part:
-            parsed = self.fill_messages(msgid)
+            parsed = self.fill_messages([msgid])
             typ = find_type(parsed[msgid], part)
 
         res = self.imap.getpart(imapname, uidvalidity, uid, part)
-        return type, res['data']
+        return typ, res['data']
     
     def create_mailboxes(self, new):
         if not new:
@@ -907,7 +907,7 @@ class ImapDB(DB):
                 notcreated[cid] = {'error': 'message does not exist'}
                 continue
             id = self.dmake('jsubmission', {
-                'sendat': str2time(sub['sendAt']) if sub['sendAt'] else time(),
+                'sendat': datetime.fromisoformat()(sub['sendAt']) if sub['sendAt'] else time(),
                 'msgid': msgid,
                 'thrid': thrid,
                 'envelope': json.dumps(sub['envelope']) if 'envelope' in sub else None,

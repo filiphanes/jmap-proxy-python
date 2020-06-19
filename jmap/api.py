@@ -1,6 +1,8 @@
 import logging as log
 import time
 import re
+from datetime import datetime
+from collections import defaultdict
 try:
     import orjson as json
 except ImportError:
@@ -20,6 +22,7 @@ class JmapApi:
         self.db = db
         self.results = []
         self.resultsByTag = {}
+        self._idmap = {}
 
     def push_result(self, cmd, result, tag):
         r = (cmd, result, tag)
@@ -75,7 +78,7 @@ class JmapApi:
             if kwargs.get('properties', None):
                 logbit += " (" + (",".join(kwargs['properties'][:4]))
                 if len(kwargs['properties']) > 4:
-                    logbit += ", ..." + len(kwargs['properties'])
+                    logbit += ", ..." + str(len(kwargs['properties']))
                 logbit += ")"
 
             try:
@@ -441,10 +444,154 @@ class JmapApi:
             'removed': removed,
             'changedProperties': ["totalEmails", "unreadEmails", "totalThreads", "unreadThreads"] if only_counts else None,
         }
+    
+    def _post_sort(self, data, sortargs, storage):
+        return data
+        # TODO: sort key function
+        fieldmap = {
+            'id': ('msgid', 0),
+            'receivedAt': ('internaldate', 1),
+            'sentAt': ('msgdate', 1),
+            'size': ('msgsize', 1),
+            'isunread': ('isUnread', 1),
+            'subject': ('sortsubject', 0),
+            'from': ('msgfrom', 0),
+            'to': ('msgto', 0),
+        }
+
+    def _load_mailbox(self, id):
+        return self.db.dgetby('jmessagemap', 'msgid', {'jmailboxid': id}, 'msgid,jmodseq,active')
+
+    def _load_msgmap(self, id):
+        rows = self.db.dget('jmessagemap', {}, 'msgid,jmailbox,jmodseq,active')
+        msgmap = defaultdict(dict)
+        for row in rows:
+            msgmap[row['msgid']][row['jmailbox']] = row
+        return msgmap
+
+    def _load_hasatt(self):
+        return set(self.db.dgetcol('jrawmessage', {'hasAttachment':1}, 'msgid'))
+
+    def _hasthreadkeyword(self, messages):
+        res = {}
+        for msg in messages:
+            # we get called by getEmailListUpdates, which includes inactive messages
+            if not msg['active']:
+                continue
+            # have already seen a message for this thread
+            if msg['thrid'] in res:
+                for keyword in msg['keywords'].keys():
+                    # if not already known about, it wasn't present on previous messages, so it's a "some"
+                    if not res[msg['thrid']][keyword]:
+                        res[msg['thrid']][keyword] = 1
+                for keyword in res[msg['thrid']].keys():
+                    # if it was known already, but isn't on this one, it's a some
+                    if not msg['keywords'][keyword]:
+                        res[msg['thrid']][keyword] = 1
+            else:
+                # first message, it's "all" for every keyword
+                res[msg['thrid']] = {kw: 2 for kw in msg['keywords'].keys()}
+        return res
+
+    def _match(self, item, condition, storage):
+        if 'operator' in condition:
+            return self._match_operator(item, condition, storage)
+        
+        cond = condition.get('inMailbox', None)
+        if cond:
+            id = self.idmap(cond)
+            if 'mailbox' not in storage:
+                storage['mailbox'] = {}
+            if id not in storage['mailbox']:
+                storage['mailbox'][id] = self._load_mailbox(id)
+            if item['msgid'] not in storage['mailbox'][id]\
+                or not storage['mailbox'][id][item['msgid']]['active']:
+                return False
+        
+        cond = condition.get('inMailboxOtherThan', None)
+        if cond:
+            if 'msgmap' not in storage:
+                storage['msgmap'] = self._load_msgmap()
+            if not isinstance(cond, list):
+                cond = [cond]
+            match = set(self.idmap(id) for id in cond)
+            data = storage['msgmap'].get(item['msgid'], {})
+            for id, msg in data.items():
+                if id not in match and msg['active']:
+                    break
+            else:
+                return False
+        
+        cond = condition.get('hasAttachment', None)
+        if cond is not None:
+            if 'hasatt' not in storage:
+                storage['hasatt'] = self._load_hasatt()
+            if item['msgid'] not in storage['hasatt']:
+                return False
+        
+        if 'search' not in storage:
+            search = []
+            for field in ('before','after','text','from','to','cc','bcc','subject','body','header'):
+                if field in condition:
+                    search.append(field)
+                    search.append(condition[field])
+            for cond, field in [
+                    ('minSize', 'LARGER'),   # NOT SMALLER?
+                    ('maxSize', 'SMALLER'),  # NOT LARGER?
+                    ('hasKeyword', 'KEYWORD'),
+                    ('notKeyword', 'UNKEYWORD'),
+                ]:
+                if cond in condition:
+                    search.append(field)
+                    search.append(condition[cond])
+
+            if search:
+                storage['search'] = set(self.db.imap.search(search))
+            else:
+                storage['search'] = None
+
+        if storage['search'] is not None and item['msgid'] not in storage['search']:
+            return False
+        
+        #TODO: allInThreadHaveKeyword
+        #TODO: someInThreadHaveKeyword
+        #TODO: noneInThreadHaveKeyword
+
+        return True
+
+    def _match_operator(self, item, filter, storage):
+        if filter['operator'] == 'NOT':
+            return not self._match_operator(item, {
+                'operator': 'OR',
+                'conditions': filter['conditions']},
+                storage)
+        elif filter['operator'] == 'OR':
+            for condition in filter['conditions']:
+                if self._match(item, condition, storage):
+                    return True
+                return False
+        elif filter['operator'] == 'AND':
+            for condition in filter['conditions']:
+                if not self._match(item, condition, storage):
+                    return False
+                return True
+        raise ValueError(f"Invalid operator {filter['operator']}")
+
+    def _messages_filter(self, data, filter, storage):
+        return [d for d in data if self._match(d, filter, storage)]
+    
+    def _collapse_messages(self, messages):
+        out = []
+        seen = set()
+        for msg in messages:
+            if msg['thrid'] not in seen:
+                out.append(msg)
+                seen.add(msg['thrid'])
+        return out
 
     def api_Email_query(self, accountId, position=None, anchor=None,
-                        anchorOffset=None, sort={}, filter={},
-                        collapseThreads=False, limit=10):
+                        anchorOffset=None, sort={}, filter={}, limit=10,
+                        collapseThreads=False, calculateTotal=False):
         user = self.db.get_user()
         if accountId and accountId != self.db.accountid:
             raise AccountNotFound()
@@ -459,14 +606,15 @@ class JmapApi:
         if start < 0:
             raise ValueError('invalid arguments')
         rows = self.db.dget('jmessages', {'active': 1})
+        rows = [dict(row) for row in rows]
         for row in rows:
-            row['keywords'] = json.decode(row['keywords'] or '{}')
+            row['keywords'] = json.loads(row['keywords'] or '{}')
         storage = {'data': rows}
-        rows = _post_sort(rows, sort, storage)
+        rows = self._post_sort(rows, sort, storage)
         if filter:
-            rows = _messages_filter(rows, filter, storage)
+            rows = self._messages_filter(rows, filter, storage)
         if collapseThreads:
-            rows = _collapseThreads(rows)
+            rows = self._collapse_messages(rows)
         
         if anchor:
             # need to calculate position
@@ -492,11 +640,112 @@ class JmapApi:
             'total': len(rows),
             'ids': [rows[i]['msgid'] for i in range(start, end)],
         }
+
+    def api_Email_get(self, accountId, ids: list, properties=()):
+        user = self.db.get_user()
+        if accountId and accountId != self.db.accountid:
+            raise AccountNotFound()
+        newState = user['jstateEmail']
+        seenids = set()
+        notFound = set()
+        lst = []
+        headers_wanted = set()
+        content_props = {'attachments', 'attachedEmails', 'hasAttachment',
+                         'headers', 'preview', 'body', 'textBody','htmlBody'}
+        if properties:
+            need_content = False
+            for prop in properties:
+                if prop.startswith('headers.'):
+                    headers_wanted.add(prop[8:])
+                    need_content = True
+                elif prop in content_props:
+                    need_content = True
+        else:
+            properties = content_props + {
+                'threadId', 'mailboxIds', 'inReplyToEmailId',
+                'hasAttachemnt', 'keywords', 'subject', 'sentAt',
+                'receivedAt', 'size', 'blobId', 'replyTo'
+                'from', 'to', 'cc', 'bcc',
+                }
+            need_content = True
+        
+        msgids = [self.idmap(i) for i in ids]
+        if need_content:
+            contents = self.db.fill_messages(msgids)
+
+        for msgid in msgids:
+            if msgid not in seenids:
+                seenids.add(msgid)
+                data = self.db.dgetone('jmessages', {'msgid': msgid})
+                if not data:
+                    notFound.add(msgid)
+                    continue
+
+            msg = {'id': msgid}
+            if 'threadId' in properties:
+                msg['threadId'] = data['thrid']
+            if 'mailboxIds' in properties:
+                ids = self.db.dgetcol('jmessagemap', {'msgid': msgid, 'active': 1}, 'jmailboxid')
+                msg['mailboxIds'] = {i: True for i in ids}
+            if 'inReplyToEmailId' in properties:
+                msg['inReplyToEmailId'] = data['msginreplyto']
+            if 'keywords' in properties:
+                msg['keywords'] = json.loads(data['keywords'])
+            for prop in ('replyTo', 'from', 'to', 'cc', 'bcc'):
+                if prop in properties:
+                    msg[prop] = json.loads(data['msg' + prop])
+            if 'subject' in properties:
+                msg['subject'] = data['msgsubject']
+            if 'sentAt' in properties:
+                msg['sentAt'] = data['msgdate']
+            if 'size' in properties:
+                msg['size'] = data['msgsize']
+            if 'receivedAt' in properties:
+                msg['receivedAt'] = data['internaldate']
+            if 'blobId' in properties:
+                msg['blobId'] = msgid
+            
+            if msgid in contents:
+                data = contents[msgid]
+                for prop in ('preview', 'textBody', 'htmlBody',
+                            'attachments', 'attachedEmails'):
+                    if prop in properties:
+                        msg[prop] = data[prop]
+                if 'body' in properties:
+                    if data['htmlBody']:
+                        msg['htmlBody'] = data['htmlBody']
+                    else:
+                        msg['textBody'] = data['textBody']
+                if 'textBody' in msg and not msg['textBody']:
+                    msg['textBody'] = htmltotext(data['htmlBody'])
+                if 'hasAttachment' in properties:
+                    msg['hasAttachment'] = bool(data['hasAttachment'])
+                if 'headers' in properties:
+                    msg['headers'] = data['headers']
+                elif headers_wanted:
+                    msg['headers'] = {}
+                    for hdr in headers_wanted:
+                        if hdr in data['headers']:
+                            msg['headers'][hdr.lower()] = data['headers'][hdr]
+
+            lst.append(msg)
+
+        return {
+            'accountId': accountId,
+            'list': lst,
+            'state': newState,
+            'notFound': notFound
+        }
+
+
+    def setid(self, key, val):
+        self._idmap[f'#{key}'] = val
     
     def idmap(self, key):
-        if not key:
-            return
-        return self.idmap.get(key, key)
+        if key:
+            return self._idmap.get(key, key)
+        else:
+            return None
 
     def begin(self):
         self.db.begin()
@@ -567,4 +816,3 @@ def _mailbox_sort(data, sortargs, storage):
                 raise Exception('Unknown field ' + field)
 
     return sorted(data, key=key)
-
