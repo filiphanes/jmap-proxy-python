@@ -3,6 +3,7 @@ import time
 import re
 from datetime import datetime
 from collections import defaultdict
+from jmap.email import htmltotext
 try:
     import orjson as json
 except ImportError:
@@ -28,7 +29,7 @@ class JmapApi:
         r = (cmd, result, tag)
         self.results.append(r)
         if cmd != 'error':
-            self.resultsByTag[tag] = r
+            self.resultsByTag[tag] = result
 
     def resolve_backref(self, tag, path):
         try:
@@ -647,10 +648,10 @@ class JmapApi:
             raise AccountNotFound()
         newState = user['jstateEmail']
         seenids = set()
-        notFound = set()
+        notFound = []
         lst = []
         headers_wanted = set()
-        content_props = {'attachments', 'attachedEmails', 'hasAttachment',
+        content_props = {'attachments', 'hasAttachment',
                          'headers', 'preview', 'body', 'textBody','htmlBody'}
         if properties:
             need_content = False
@@ -669,16 +670,18 @@ class JmapApi:
                 }
             need_content = True
         
-        msgids = [self.idmap(i) for i in ids]
+        msgids = [self.idmap(i) for i in set(ids)]
         if need_content:
             contents = self.db.fill_messages(msgids)
+        else:
+            contents = {}
 
         for msgid in msgids:
             if msgid not in seenids:
                 seenids.add(msgid)
                 data = self.db.dgetone('jmessages', {'msgid': msgid})
                 if not data:
-                    notFound.add(msgid)
+                    notFound.append(msgid)
                     continue
 
             msg = {'id': msgid}
@@ -691,7 +694,7 @@ class JmapApi:
                 msg['inReplyToEmailId'] = data['msginreplyto']
             if 'keywords' in properties:
                 msg['keywords'] = json.loads(data['keywords'])
-            for prop in ('replyTo', 'from', 'to', 'cc', 'bcc'):
+            for prop in ('from', 'to', 'cc', 'bcc'):
                 if prop in properties:
                     msg[prop] = json.loads(data['msg' + prop])
             if 'subject' in properties:
@@ -707,8 +710,7 @@ class JmapApi:
             
             if msgid in contents:
                 data = contents[msgid]
-                for prop in ('preview', 'textBody', 'htmlBody',
-                            'attachments', 'attachedEmails'):
+                for prop in ('preview', 'textBody', 'htmlBody', 'attachments'):
                     if prop in properties:
                         msg[prop] = data[prop]
                 if 'body' in properties:
@@ -736,6 +738,73 @@ class JmapApi:
             'state': newState,
             'notFound': notFound
         }
+
+
+    def api_Thread_get(self, accountId, ids: list):
+        if accountId and accountId != self.db.accountid:
+            raise AccountNotFound()
+        user = self.db.get_user()
+        newState = user['jstateThread']
+        lst = []
+        seenids = set()
+        notFound = []
+        for id in set(ids):
+            thrid = self.idmap(id)
+            if thrid in seenids:
+                continue
+            data = self.db.dgetfield('jthreads', {'thrid': thrid, 'active': True}, 'data')
+            if data:
+                lst.append({
+                    'id': thrid,
+                    'emailIds': json.loads(data),
+                })
+            else:
+                notFound.append(thrid)
+
+        return {
+            'accountId': accountId,
+            'list': lst,
+            'state': newState,
+            'notFound': notFound,
+        }
+
+
+    def api_Thread_changes(self, accountId, sinceState, maxChanges=None, properties=()):
+        if accountId and accountId != self.db.accountid:
+            raise AccountNotFound()
+        user = self.db.get_user()
+        newState = user['jstateThread']
+        if user['jdeletedmodseq'] and sinceState <= user['deletedmodseq']:
+            raise Exception(f'cannotCalculateChanges, newState: {newState}')
+        
+        rows = self.db.dget('jthreads', {'jmodseq': ('>', sinceState)},
+                            'thrid,active,jcreated')
+        if maxChanges and len(rows) > maxChanges:
+            raise Exception(f'cannotCalculateChanges, newState: {newState}')
+        
+        created = []
+        updated = []
+        removed = []
+        for thrid, active, jcreated in rows:
+            if active:
+                if jcreated <= sinceState:
+                    updated.append(thrid)
+                else:
+                    created.append(thrid)
+            elif jcreated <= sinceState:
+                removed.append(thrid)
+            # else never seen
+        
+        return {
+            'accountId': accountId,
+            'oldState': sinceState,
+            'newState': newState,
+            'created': created,
+            'updated': updated,
+            'removed': removed,
+        }
+
+
 
 
     def setid(self, key, val):

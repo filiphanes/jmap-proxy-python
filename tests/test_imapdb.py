@@ -16,3 +16,7 @@ def test_sync_folders(db):
 
 def test_sync_imap(db):
     db.sync_imap()
+
+
+def test_sync_jmap(db):
+    db.sync_jmap()

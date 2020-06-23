@@ -177,16 +177,11 @@ class ImapDB(DB):
         ifolders = self.cursor.fetchall()
         for folder in ifolders:
             print('folder:', list(folder))
-            if (folder['label'] or '').lower() == '\\allmail':
-                # we dont show this folder
-                continue
             fname = folder['imapname']
             # check for roles first
             #TODO: n.decode('IMAP-UTF-7')
             bits = [n for n in fname.split(folder['sep'])]
             if bits[0] == 'INBOX' and len(bits) > 1:
-                bits = bits[1:]
-            if bits[0] == '[Gmail]':
                 bits = bits[1:]
             if not bits:
                 continue
@@ -206,7 +201,7 @@ class ImapDB(DB):
                     seen.add(id)
                 parentId = id
                 id = byname[parentId].get(name, None)
-                if not id and bits:
+                if id is None and bits:
                     # need to create intermediate folder ...
                     # XXX  - label noselect?
                     id = str(uuid.uuid4())
@@ -259,9 +254,9 @@ class ImapDB(DB):
                     byname[parentId][name] = id
                     if role:
                         roletoid[role] = id
-                seen.add(id)
-                self.dmaybeupdate('ifolders', {'jmailboxid': id},
-                    {'ifolderid': folder['ifolderid']})
+            seen.add(id)
+            self.dmaybeupdate('ifolders', {'jmailboxid': id},
+                {'ifolderid': folder['ifolderid']})
             
         for mailbox in jmailboxes:
             id = mailbox['jmailboxid']
@@ -698,6 +693,8 @@ class ImapDB(DB):
         for msgid in msgids:
             self.sync_jmap_msgid(msgid)
             self.cursor.execute('DELETE FROM imsgidtodo WHERE msgid=?', [msgid])
+        if msgids:
+            self.commit()
 
     def fill_messages(self, ids):
         if not ids:
@@ -737,10 +734,10 @@ class ImapDB(DB):
             for uid, data in res.items():
                 msgid = uhash[uid]
                 result[msgid] = email.parse(data[b'RFC822'])
-                self.cursor.execute("INSERT OR REPLACE INTO jrawmessage (msgid,parsed,hasAttachment VALUES (?,?,?)", [
+                self.cursor.execute("INSERT OR REPLACE INTO jrawmessage (msgid,parsed,hasAttachment) VALUES (?,?,?)", [
                     msgid,
                     json.dumps(result[msgid]),
-                    result[msgid].get('hasAttachment', False),
+                    result[msgid].get('hasAttachment', 0),
                     ])
         self.commit()
 

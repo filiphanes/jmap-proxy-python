@@ -35,7 +35,7 @@ def test_Email_query_inMailbox(api):
         ["Email/query", {
             "accountId": "u1",
             "filter": {
-                "inMailbox": "a718b2ff-6a8c-49f7-a4dd-751f61ac0b3d"   # inbox
+                "inMailbox": "b7c21828-32b1-475d-b8bd-998c01c92b71"   # inbox
             },
             "position": 0,
             "collapseThreads": True,
@@ -60,19 +60,18 @@ def test_Email_query_inMailbox(api):
 
 
 def test_Email_get(api):
-    properties = [
-        'threadId', 'mailboxIds', 'inReplyToEmailId',
-        'hasAttachemnt', 'keywords', 'subject', 'sentAt',
-        'receivedAt', 'size', 'blobId', 'replyTo'
+    properties = {
+        'threadId', 'mailboxIds', 'inReplyToEmailId', 'keywords', 'subject',
+        'sentAt', 'receivedAt', 'size', 'blobId', #'replyTo',
         'from', 'to', 'cc', 'bcc',
-        'attachments', 'attachedEmails', 'hasAttachment',
-        'headers', 'preview', 'body', 'textBody', 'htmlBody'
-    ]
+        'attachments', 'hasAttachment',
+        'headers', 'preview', 'body', 'textBody', 'htmlBody',
+    }
     res = api.handle_request({"methodCalls": [
         ["Email/get", {
             "accountId": "u1",
             "ids": ["ma854e1c42", "me400ec47d"],
-            "properties": properties,
+            "properties": list(properties),
         }, "1"]
     ]})
     assert len(res['methodResponses']) == 1
@@ -80,10 +79,12 @@ def test_Email_get(api):
         assert method == "Email/get"
         assert tag == "1"
         assert response['accountId'] == "u1"
+        assert isinstance(response['notFound'], list)
+        assert len(response['notFound']) == 0
         assert isinstance(response['list'], list)
         assert len(response['list']) == 2
         for msg in response['list']:
-            for prop in properties:
+            for prop in properties - {'body'}:
                 assert prop in msg
 
 
@@ -93,7 +94,7 @@ def test_Email_query_first_page(api):
         ["Email/query", {
             "accountId": "u1",
             "filter": {
-                "inMailbox": "a718b2ff-6a8c-49f7-a4dd-751f61ac0b3d"   # inbox
+                "inMailbox": "b7c21828-32b1-475d-b8bd-998c01c92b71"   # inbox
             },
             "sort": [
                 {"property": "receivedAt", "isAscending": False}
@@ -138,4 +139,5 @@ def test_Email_query_first_page(api):
     ]})
     assert len(res['methodResponses']) == 4
     for method, response, tag in res['methodResponses']:
-        assert len(response['ids']) > 0
+        assert len(response['ids']) > 0 \
+            or len(response['list']) > 0
