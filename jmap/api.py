@@ -74,7 +74,7 @@ class JmapApi:
             if kwargs.get('ids', None):
                 logbit += " [" + (",".join(kwargs['ids'][:4]))
                 if len(kwargs['ids']) > 4:
-                    logbit += ", ..." + len(kwargs['ids'])
+                    logbit += ", ..." + str(len(kwargs['ids']))
                 logbit += "]"
             if kwargs.get('properties', None):
                 logbit += " (" + (",".join(kwargs['properties'][:4]))
@@ -404,20 +404,17 @@ class JmapApi:
         }
 
     def api_Mailbox_changes(self, sinceState, accountId=None, maxChanges=None, **kwargs):
-        self.db.begin()
-        user = self.db.get_user()
         if accountId and accountId != self.db.accountid:
-            self.db.rollback()
             raise AccountNotFound()
+        user = self.db.get_user()
 
-        new_state = user.jstateMailbox
-        if user.jdeletemodseq and sinceState <= user.jdeletemodseq:
+        new_state = user['jstateMailbox']
+        if user['jdeletemodseq'] and sinceState <= user['jdeletemodseq']:
             raise CannotCalculateChanges(f'new_state: {new_state}')
         rows = self.db.dget('jmailboxes', {'jmodseq': ['>', sinceState]})
 
         if maxChanges and len(rows) > maxChanges:
             raise CannotCalculateChanges(f'new_state: {new_state}')
-        self.db.commit()
 
         created = []
         updated = []
@@ -748,15 +745,16 @@ class JmapApi:
         lst = []
         seenids = set()
         notFound = []
-        for id in set(ids):
+        for id in ids:
             thrid = self.idmap(id)
             if thrid in seenids:
                 continue
-            data = self.db.dgetfield('jthreads', {'thrid': thrid, 'active': True}, 'data')
-            if data:
+            seenids.add(thrid)
+            msgids = self.db.dgetcol('jmessages', {'thrid': thrid, 'active': 1}, 'msgid')
+            if msgids:
                 lst.append({
                     'id': thrid,
-                    'emailIds': json.loads(data),
+                    'emailIds': msgids,
                 })
             else:
                 notFound.append(thrid)
@@ -775,12 +773,12 @@ class JmapApi:
         user = self.db.get_user()
         newState = user['jstateThread']
         if user['jdeletedmodseq'] and sinceState <= user['deletedmodseq']:
-            raise Exception(f'cannotCalculateChanges, newState: {newState}')
+            raise CannotCalculateChanges(f'new_state: {newState}')
         
         rows = self.db.dget('jthreads', {'jmodseq': ('>', sinceState)},
                             'thrid,active,jcreated')
         if maxChanges and len(rows) > maxChanges:
-            raise Exception(f'cannotCalculateChanges, newState: {newState}')
+            raise CannotCalculateChanges(f'new_state: {newState}')
         
         created = []
         updated = []
@@ -864,6 +862,18 @@ def _prop_wanted(args, prop):
     return prop == 'id' \
         or not args['properties'] \
         or prop in args['properties']
+
+def _makefullnames(mailboxes):
+    idmap = {d['jmailboxid']: d for d in mailboxes}
+    idmap.pop('', None)  # just in case
+    fullnames = {}
+    for id, mbox in idmap.items():
+        names = []
+        while mbox:
+            names.append(mbox['name'])
+            mbox = idmap.get(mbox['parentId'], None)
+        fullnames[id] = '\x1e'.join(reversed(names))
+    return fullnames
 
 def _mailbox_sort(data, sortargs, storage):
     return data

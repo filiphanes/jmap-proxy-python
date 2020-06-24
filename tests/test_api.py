@@ -89,6 +89,10 @@ def test_Email_get(api):
 
 
 def test_Email_query_first_page(api):
+    properties = [
+        "threadId", "mailboxIds", "subject", "receivedAt",
+        "keywords", "hasAttachment", "from", "to", "preview",
+    ]
     res = api.handle_request({"methodCalls": [
         # First we do a query for the id of first 10 messages in the mailbox
         ["Email/query", {
@@ -134,10 +138,120 @@ def test_Email_query_first_page(api):
                 "path": "/list/*/emailIds",
                 "resultOf": "2"
             },
-            "properties": ["subject", "receivedAt"]
+            "properties": properties
         }, "3"]
     ]})
     assert len(res['methodResponses']) == 4
     for method, response, tag in res['methodResponses']:
-        assert len(response['ids']) > 0 \
-            or len(response['list']) > 0
+        if tag == '0':
+            assert len(response['ids']) > 0
+        elif tag == '1':
+            assert len(response['list']) > 0
+        elif tag == '2':
+            assert len(response['list']) > 0
+            assert response['notFound'] == []
+        elif tag == '3':
+            assert len(response['list']) > 0
+            for msg in response['list']:
+                for prop in properties:
+                    assert prop in msg
+
+
+def test_Email_query_second_page(api):
+    properties = [
+        "threadId", "mailboxIds", "subject", "receivedAt",
+        "keywords", "hasAttachment", "from", "to", "preview",
+    ]
+    res = api.handle_request({"methodCalls": [
+        [ "Email/query", {
+            "accountId": "u1",
+            "filter": {
+                "inMailbox": "b7c21828-32b1-475d-b8bd-998c01c92b71"   # inbox
+            },
+            "sort": [
+                { "property": "receivedAt", "isAscending": False }
+            ],
+            "collapseThreads": True,
+            "position": 4,
+            "limit": 10
+        }, "0" ],
+        [ "Email/get", {
+            "accountId": "u1",
+            "#ids": {
+                "name": "Email/query",
+                "path": "/ids",
+                "resultOf": "0"
+            },
+            "properties": properties
+        }, "1" ]
+    ]})
+    assert len(res['methodResponses']) == 2
+    for method, response, tag in res['methodResponses']:
+        if tag == '0':
+            assert len(response['ids']) > 0
+        elif tag == '1':
+            assert len(response['list']) > 0
+            for msg in response['list']:
+                for prop in properties:
+                    assert prop in msg
+
+
+def test_Email_changes(api):
+    res = api.handle_request({"methodCalls": [
+        # Fetch a list of created/updated/deleted Emails
+        [ "Email/changes", {
+            "accountId": "u1",
+            "sinceState": "1",
+            "maxChanges": 30
+        }, "0"],
+    ]})
+    assert len(res['methodResponses']) == 2
+
+
+def test_Thread_changes(api):
+    res = api.handle_request({"methodCalls": [
+        # Fetch a list of created/udpated/deleted Threads
+        [ "Thread/changes", {
+            "accountId": "u1",
+            "sinceState": "1",
+            "maxChanges": 30
+        }, "0"],
+    ]})
+    assert len(res['methodResponses']) == 2
+
+
+def test_Mailbox_changes(api):
+    res = api.handle_request({"methodCalls": [
+        # Fetch a list of mailbox ids that have changed
+        [ "Mailbox/changes", {
+            "accountId": "u1",
+            "sinceState": "1"
+        }, "0"],
+        # Fetch any mailboxes that have been created
+        [ "Mailbox/get", {
+            "accountId": "u1",
+            "#ids": {
+                "name": "Mailbox/changes",
+                "path": "/created",
+                "resultOf": "0",
+            }
+        }, "1" ],
+        # Fetch any mailboxes that have been updated
+        [ "Mailbox/get", {
+            "accountId": "u1",
+            "#ids": {
+                "name": "Mailbox/changes",
+                "path": "/updated",
+                "resultOf": "0"
+            },
+            "#properties": {
+                "name": "Mailbox/changes",
+                "path": "/updatedProperties",
+                "resultOf": "0"
+            }
+        }, "2" ]
+    ]})
+    assert len(res['methodResponses']) == 1
+    for method, response, tag in res['methodResponses']:
+        if tag == '0':
+            assert len(response['list']) > 0

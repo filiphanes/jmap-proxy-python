@@ -10,6 +10,8 @@ try:
 except ImportError:
     import json
 
+from jmap import email
+
 TABLE2GROUPS = {
   'jmessages': ['Email'],
   'jthreads': ['Thread'],
@@ -146,10 +148,10 @@ class DB:
 
     def touch_thread_by_msgid(self, msgid):
         self.cursor.execute("SELECT thrid FROM jmessages WHERE msgid=?", [msgid])
-        row = self.cursor.fetchone()
-        if not row:
+        try:
+            thrid, = self.cursor.fetchone()
+        except ValueError:  # not found
             return
-        thrid = row[0]
         self.cursor.execute("SELECT msgid,isDraft,msginreplyto,msgmessageid FROM jmessages WHERE thrid=? AND active=1", [thrid])
         messages = self.cursor.fetchall()
         if not messages:
@@ -184,9 +186,7 @@ class DB:
                              {'active': 1, 'data': json.dumps(msgs)},
                              {'thrid': thrid})
         else:
-            self.dmake('jthreads',
-                       {'active': 1, 'data': json.dumps(msgs)},
-                       {'thrid': thrid})
+            self.dmake('jthreads', {'thrid': thrid, 'data': json.dumps(msgs)})
     
     def add_message(self, data, mailboxes):
         if mailboxes:
@@ -284,7 +284,7 @@ class DB:
             keywords = item.pop('keywords', ())
             item['msgdate'] = datetime.now()
             item['headers']['Message-ID'] += '<' + str(uuid.uuid4()) + '.' + item['msgdate'] + os.getenv('jmaphost')
-            message = jmap.EmailObject.make(item, self.get_blob())
+            message = email.make(item, self.get_blob())
             todo[cid] = (message, mailboxIds, keywords)
         
         created = {}

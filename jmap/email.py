@@ -1,8 +1,10 @@
 import hashlib
 import email
 from email.header import decode_header, make_header
-from email.utils import getaddresses, parsedate_to_datetime
+from email.message import EmailMessage
+from email.utils import format_datetime, getaddresses, parsedate_to_datetime
 from datetime import datetime
+import re
 
 
 def parse(rfc822, id=None):
@@ -78,3 +80,73 @@ def asAddresses(hdrs):
 def htmltotext(html):
     # TODO: remove html tags ...
     return html
+
+def _mkone(a):
+    if a['name']:
+        return f"\"{a['name']}\" <{a['email']}>"
+    else:
+        return f"{a['email']}"
+
+def _mkemail(aa):
+    return ', '.join(_mkone(a) for a in aa)
+
+def _detect_encoding(content, typ):
+    if typ.startswith('message'):
+        match = re.match(r'[^\x20-\x7f]')
+        if match:
+            return '8bit'
+        return '7bit'
+    elif type.startswith('text'):
+        #XXX - also line lengths?
+        match = re.match(r'[^\x20-\x7f]')
+        if match:
+            return 'quoted-printable'
+        return '7bit'
+    return 'base64'
+
+def _makeatt(att, blobs):
+    msg = EmailMessage()
+    msg.add_header('Content-Type', att['type'], name=att['name'])
+    msg.add_header('Content-Disposition',
+        'inline' if att['isInline'] else 'attachment',
+        filename=att['name'],
+        )
+
+    if att['cid']:
+        msg.add_header('Content-ID', "<" + att['cid'] + ">")
+    typ, content = blobs[att['blobId']]
+    msg.add_header('Content-Transfer-Encoding', _detect_encoding(content, att['type']))
+    msg.set_payload(content)
+    return msg
+
+def make(args, blobs):
+    msg = EmailMessage()
+    msg['From'] = _mkemail(args['from'])
+    msg['To'] = _mkemail(args['to'])
+    msg['Cc'] = _mkemail(args['cc'])
+    msg['Bcc'] = _mkemail(args['bcc'])
+    msg['Subject'] = args['subject']
+    msg['Date'] = format_datetime(args['msgdate'])
+    for header, val in args['headers'].items():
+        msg[header] = val
+    if 'replyTo' in args:
+        msg['replyTo'] = args['replyTo']
+
+    if 'textBody' in args:
+        text = args['textBody']
+    else:
+        text = htmltotext(args['htmlBody'])
+    msg.add_header('Content-Type', 'text/plain')
+    msg.set_content(text)
+
+    if 'htmlBody' in args:
+        htmlpart = EmailMessage()
+        htmlpart.add_header('Content-Type', 'text/html')
+        htmlpart.set_content(args['htmlBody'])
+        msg.make_alternative()
+        msg.add_alternative(htmlpart)
+
+    for att in args.get('attachments', ()):
+        msg.add_attachment(_makeatt(att, blobs))
+    
+    return msg.as_string()
