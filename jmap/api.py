@@ -639,7 +639,12 @@ class JmapApi:
             'ids': [rows[i]['msgid'] for i in range(start, end)],
         }
 
-    def api_Email_get(self, accountId, ids: list, properties=()):
+    def api_Email_get(self,
+            accountId,
+            ids: list,
+            properties=None,
+            bodyProperties=None,
+            fetchHTMLBodyValues=False):
         user = self.db.get_user()
         if accountId and accountId != self.db.accountid:
             raise AccountNotFound()
@@ -648,8 +653,8 @@ class JmapApi:
         notFound = []
         lst = []
         headers_wanted = set()
-        content_props = {'attachments', 'hasAttachment',
-                         'headers', 'preview', 'body', 'textBody','htmlBody'}
+        content_props = {'attachments', 'hasAttachment', 'headers', 'preview',
+                         'body', 'textBody', 'htmlBody', 'bodyValues'}
         if properties:
             need_content = False
             for prop in properties:
@@ -660,13 +665,18 @@ class JmapApi:
                     need_content = True
         else:
             properties = content_props + {
-                'threadId', 'mailboxIds', 'inReplyToEmailId',
+                'threadId', 'mailboxIds',
                 'hasAttachemnt', 'keywords', 'subject', 'sentAt',
                 'receivedAt', 'size', 'blobId', 'replyTo'
-                'from', 'to', 'cc', 'bcc',
-                }
+                'from', 'to', 'cc', 'bcc', 'replyTo',
+                'messageId', 'inReplyTo', 'references', 'sender',
+            }
             need_content = True
-        
+        if not bodyProperties:
+            bodyProperties = {"partId", "blobId", "size", "name", "type",
+                "charset", "disposition", "cid", "language", "location",
+            }
+
         msgids = [self.idmap(i) for i in set(ids)]
         if need_content:
             contents = self.db.fill_messages(msgids)
@@ -697,11 +707,11 @@ class JmapApi:
             if 'subject' in properties:
                 msg['subject'] = data['msgsubject']
             if 'sentAt' in properties:
-                msg['sentAt'] = data['msgdate']
+                msg['sentAt'] = datetime.fromisoformat(data['msgdate'])
             if 'size' in properties:
                 msg['size'] = data['msgsize']
             if 'receivedAt' in properties:
-                msg['receivedAt'] = data['internaldate']
+                msg['receivedAt'] = datetime.fromisoformat(data['internaldate'])
             if 'blobId' in properties:
                 msg['blobId'] = msgid
             

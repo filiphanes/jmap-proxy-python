@@ -2,8 +2,9 @@ from jmap import ImapDB
 
 
 def test_init():
-    db = ImapDB('u1')
-    assert db.accountid == 'u1'
+    username = 'u1'
+    db = ImapDB(username)
+    assert db.accountid == username
 
 
 def test_firstsync(db):

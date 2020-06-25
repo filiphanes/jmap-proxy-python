@@ -12,6 +12,7 @@ except ImportError:
 
 from imapclient import IMAPClient
 from jmap import email
+from email.header import decode_header, make_header
 
 TAG = 1
 
@@ -313,7 +314,7 @@ class ImapDB(DB):
         messageid = (envelope.get('Message-ID', '') or '').strip()
         encsub = (envelope.get('Subject') or '')
         try:
-            encsub = encsub.decode('MIME-Header')
+            encsub = str(make_header(decode_header(encsub)))
         except Exception:
             pass
         sortsub = _normalsubject(encsub)
@@ -407,7 +408,7 @@ class ImapDB(DB):
                     ('Bcc', 'bcc')]:
                 if getattr(e, attr):
                     envelope[field] = [{
-                        'name': a.name and a.name.decode(),
+                        'name': a.name and str(make_header(decode_header(a.name.decode()))),
                         'email': (b'%s@%s' % (a.mailbox, a.host)).decode(),
                         } for a in getattr(e, attr)]
             msg[b'ENVELOPE'] = envelope
@@ -1090,8 +1091,7 @@ def _envelopedata(data):
     print('envelope:', envelope)
     encsub = envelope.get('Subject', '')
     try:
-        # TODO: implement correct decoder
-        encsub = encsub.decode('MIME-HEADER')
+        encsub = str(make_header(decode_header(encsub)))
     except Exception:
         pass
     sortsub = _normalsubject(encsub)
