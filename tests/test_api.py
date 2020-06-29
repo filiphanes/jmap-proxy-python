@@ -35,7 +35,7 @@ def test_Email_query_inMailbox(api):
         ["Email/query", {
             "accountId": "u1",
             "filter": {
-                "inMailbox": "b7c21828-32b1-475d-b8bd-998c01c92b71"   # inbox
+                "inMailbox": "75f21771-351f-43f6-bde0-4286ce638779"   # inbox
             },
             "position": 0,
             "collapseThreads": True,
@@ -88,6 +88,36 @@ def test_Email_get(api):
                 assert prop in msg
 
 
+def test_Email_set(api):
+    res = api.handle_request({"methodCalls": [
+        ["Email/set", {
+            "accountId": "u1",
+            "update": {
+                "mb3585e9ba": {
+                    "keywords/$seen": True
+                }
+            }
+        }, "0"]
+    ]})
+    assert len(res['methodResponses']) == 1
+    for method, response, tag in res['methodResponses']:
+        assert method == "Email/set"
+        assert tag == "0"
+        assert response['accountId'] == "u1"
+        assert isinstance(response['updated'], dict)
+        assert isinstance(response['notUpdated'], dict)
+        assert isinstance(response['created'], dict)
+        assert isinstance(response['notCreated'], dict)
+        assert isinstance(response['destroyed'], list)
+        assert isinstance(response['notDestroyed'], dict)
+        assert len(response['updated']) > 0
+        assert len(response['notUpdated']) == 0
+        assert len(response['created']) == 0
+        assert len(response['notCreated']) == 0
+        assert len(response['destroyed']) == 0
+        assert len(response['notDestroyed']) == 0
+
+
 def test_Email_query_first_page(api):
     properties = [
         "threadId", "mailboxIds", "subject", "receivedAt",
@@ -98,7 +128,7 @@ def test_Email_query_first_page(api):
         ["Email/query", {
             "accountId": "u1",
             "filter": {
-                "inMailbox": "b7c21828-32b1-475d-b8bd-998c01c92b71"   # inbox
+                "inMailbox": "75f21771-351f-43f6-bde0-4286ce638779"   # inbox
             },
             "sort": [
                 {"property": "receivedAt", "isAscending": False}
@@ -166,7 +196,7 @@ def test_Email_query_second_page(api):
         [ "Email/query", {
             "accountId": "u1",
             "filter": {
-                "inMailbox": "b7c21828-32b1-475d-b8bd-998c01c92b71"   # inbox
+                "inMailbox": "75f21771-351f-43f6-bde0-4286ce638779"   # inbox
             },
             "sort": [
                 { "property": "receivedAt", "isAscending": False }

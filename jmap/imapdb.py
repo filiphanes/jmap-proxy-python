@@ -11,6 +11,7 @@ except ImportError:
     import json
 
 from imapclient import IMAPClient
+from imapclient.response_types import Envelope
 from jmap import email
 from email.header import decode_header, make_header
 
@@ -52,12 +53,14 @@ ROLE_MAP = {
 }
 
 
-KEYWORD2FLAG = (
-    ('$answered', '\\Answered'),
-    ('$flagged', '\\Flagged'),
-    ('$draft', '\\Draft'),
-    ('$seen', '\\Seen'),
-)
+KEYWORD2FLAG = {
+    '$answered': '\\Answered',
+    '$flagged': '\\Flagged',
+    '$draft': '\\Draft',
+    '$seen': '\\Seen',
+}
+FLAG2KEYWORD = {f.lower(): kw for f, kw in KEYWORD2FLAG.items()}
+
 
 class ImapDB(DB):
     def __init__(self, accountid, *args, **kwargs):
@@ -145,7 +148,7 @@ class ImapDB(DB):
         
         self.dmaybeupdate('iserver', {
             'imapPrefix': prefix,
-            'lastfoldersync': datetime.now(),
+            'lastfoldersync': datetime.now().isoformat(),
         })
         # self.commit()
 
@@ -301,18 +304,18 @@ class ImapDB(DB):
         self.cursor.execute('SELECT ifolderid, label FROM ifolders'
                             ' WHERE UPPER(imapname) = "INBOX" LIMIT 1')
         for ifolderid, label in self.cursor.fetchall():
-            self.do_folder(ifolderid, label, 50)
+            self.do_folder(ifolderid, label, 100)
         self.sync_jmap()
         
     def calcmsgid(self, imapname, uid, msg):
         envelope = msg[b'ENVELOPE']
-        print("msg[b'ENVELOPE']=", msg[b'ENVELOPE'])
-        coded = json.dumps([envelope])
+        # print("msg[b'ENVELOPE']=", msg[b'ENVELOPE'])
+        coded = json.dumps([envelope], default=jsonDefault)
         base = hashlib.sha1(coded).hexdigest()[:9]
         msgid = 'm' + base
-        in_reply_to = (envelope.get('In-Reply-To', '') or '').strip()
-        messageid = (envelope.get('Message-ID', '') or '').strip()
-        encsub = (envelope.get('Subject') or '')
+        in_reply_to = envelope.in_reply_to
+        messageid = envelope.message_id
+        encsub = envelope.subject
         try:
             encsub = str(make_header(decode_header(encsub)))
         except Exception:
@@ -362,7 +365,7 @@ class ImapDB(DB):
         }
 
         if not batchsize:
-            new = self.imap.fetch((oldstate['uidnext'],'*'), fetch_data,fetch_modifiers)
+            new = self.imap.fetch((oldstate['uidnext'], '*'), fetch_data, fetch_modifiers)
             update = self.imap.fetch((uidfirst, oldstate['uidnext']-1), ('UID', 'FLAGS'))
             backfill = {}
         elif uidfirst > 1:
@@ -385,45 +388,47 @@ class ImapDB(DB):
         if newstate['uidvalidity'] != uidvalidity:
             # going to want to nuke everything for the existing folder and create this  - but for now, just die
             raise Exception(f"UIDVALIDITY CHANGED {imapname}: {uidvalidity} => {newstate['uidvalidity']}")
-            
+        
+
         self.begin()
         didold = 0
         for uid, msg in backfill.items():
-            e = msg[b'ENVELOPE']
-            print(e.reply_to)
-            envelope = {'Date': e.date}
-            if e.subject:
-                envelope['Subject'] = e.subject.decode()
-            if e.in_reply_to:
-                envelope['In-Reply-To'] = e.in_reply_to.decode()
-            if e.message_id:
-                envelope['Message-ID'] = e.message_id.decode()
-
-            for field, attr in [
-                    ('Sender', 'sender'),
-                    ('Reply-To', 'reply_to'),
-                    ('From', 'from_'),
-                    ('To', 'to'),
-                    ('Cc', 'cc'),
-                    ('Bcc', 'bcc')]:
-                if getattr(e, attr):
-                    envelope[field] = [{
-                        'name': a.name and str(make_header(decode_header(a.name.decode()))),
-                        'email': (b'%s@%s' % (a.mailbox, a.host)).decode(),
-                        } for a in getattr(e, attr)]
-            msg[b'ENVELOPE'] = envelope
-
             msgid, thrid = self.calcmsgid(imapname, uid, msg)
             didold += 1
-            self.new_record(ifolderid, uid, msg[b'FLAGS'], [forcelabel], msg[b'ENVELOPE'], msg[b'INTERNALDATE'], msgid, thrid, msg[b'RFC822.SIZE'])
+            self.new_record(
+                ifolderid,
+                uid,
+                (f.decode() for f in msg[b'FLAGS'] if f.lower() != b'\\recent'),
+                [forcelabel],
+                msg[b'ENVELOPE'],
+                msg[b'INTERNALDATE'],
+                msgid,
+                thrid,
+                msg[b'RFC822.SIZE'],
+            )
         
         for uid, msg in update.items():
             print('msg:', msg)
-            self.changed_record(ifolderid, uid, msg[b'FLAGS'], [forcelabel])
+            self.changed_record(
+                ifolderid,
+                uid,
+                (f.decode() for f in msg[b'FLAGS'] if f.lower() != b'\\recent'),
+                [forcelabel],
+            )
 
         for uid, msg in new.items():
             msgid, thrid = self.calcmsgid(imapname, uid, msg)
-            self.new_record(ifolderid, uid, msg[b'FLAGS'], [forcelabel], msg[b'ENVELOPE'], msg[b'INTERNALDATE'], msgid, thrid, msg[b'RFC822.SIZE'])
+            self.new_record(
+                ifolderid,
+                uid,
+                (f.decode() for f in msg[b'FLAGS'] if f.lower() != b'\\recent'),
+                [forcelabel],
+                msg[b'ENVELOPE'],
+                msg[b'INTERNALDATE'],
+                msgid,
+                thrid,
+                msg[b'RFC822.SIZE'],
+            )
 
         self.dupdate('ifolders', {
             'highestmodseq': newstate['highestmodseq'],
@@ -468,7 +473,7 @@ class ImapDB(DB):
     
     def changed_record(self, ifolderid, uid, flags=(), labels=()):
         res = self.dmaybeupdate('imessages', {
-            'flags': json.dumps([f for f in flags if f.lower() != '\\recent']),
+            'flags': json.dumps(sorted(flags)),
             'labels': json.dumps(sorted(labels)),
         }, {'ifolderid': ifolderid, 'uid': uid})
         if res:
@@ -483,12 +488,11 @@ class ImapDB(DB):
         id, others = mailboxIds
         imapname = jmailmap[id][imapname]
         flags = set(keywords)
-        for kw, flag in KEYWORD2FLAG:
-            if flags.pop(kw):
-                flags.add(flag)
-        internaldate = time()
-        date = datetime.fromisoformat()(internaldate)
-        appendres = self.imap.append('imapname', '(' + ' '.join(flags) + ')', date, rfc822)
+        for kw in flags:
+            if kw in KEYWORD2FLAG:
+                flags.remove(kw)
+                flags.add(KEYWORD2FLAG[kw])
+        appendres = self.imap.append('imapname', '(' + ' '.join(flags) + ')', datetime.now(), rfc822)
         # TODO: compare appendres[2] with uidvalidity
         uid = appendres[3]
         fdata = jmailmap[mailboxIds[0]]
@@ -521,15 +525,15 @@ class ImapDB(DB):
         notchanged = {}
         map = {}
         msgids = set(changes.keys())
-        rows = self.dget('imessages', {
-            'msgid': ('IN', msgids)},
-            'msgid,ifolderid,uid')
-        for msgid, ifolderid, uid in rows:
+        sql = 'SELECT msgid,ifolderid,uid FROM imessages WHERE msgid IN (' + (('?,' * len(msgids))[:-1]) + ')'
+        self.cursor.execute(sql, list(msgids))
+        for msgid, ifolderid, uid in self.cursor:
             if not msgid in map:
-                map[msgid] = {}
-            if not ifolderid in map[msgid]:
-                map[msgid][ifolderid] = set()
-            map[msgid][ifolderid].add(uid)
+                map[msgid] = {ifolderid: {uid}}
+            elif not ifolderid in map[msgid]:
+                map[msgid][ifolderid] = {uid}
+            else:
+                map[msgid][ifolderid].add(uid)
             msgids.discard(msgid)
 
         for msgid in msgids:
@@ -542,7 +546,7 @@ class ImapDB(DB):
         foldermap = {f['ifolderid']: f for f in folderdata}
         jmailmap = {f['jmailboxid']: f for f in folderdata if 'jmailboxid' in f}
         jmapdata = self.dget('jmailboxes')
-        jidmap = {d['jmailboxid']: d.get('role', '') for d in jmapdata}
+        jidmap = {d['jmailboxid']: (d['role'] or '') for d in jmapdata}
         jrolemap = {d['role']: d['jmailboxid'] for d in jmapdata if 'role' in d}
 
         for msgid in map.keys():
@@ -550,17 +554,19 @@ class ImapDB(DB):
             try:
                 for ifolderid, uids in map[msgid].items():
                     # TODO: merge similar actions?
-                    imapname = foldermap[ifolderid].get('imapname')
-                    uidvalidity = foldermap[ifolderid].get('uidvalidity')
+                    imapname = foldermap[ifolderid]['imapname']
+                    uidvalidity = foldermap[ifolderid]['uidvalidity']
+                    self.imap.select_folder(imapname)
                     if imapname and uidvalidity and 'keywords' in action:
                         flags = set(action['keywords'])
-                        for kw, flag in KEYWORD2FLAG:
-                            if flags.pop(kw):
-                                flags.add(flag)
-                        self.imap.update(imapname, uidvalidity, uids, flags)
+                        for kw in flags:
+                            if kw in KEYWORD2FLAG:
+                                flags.remove(kw)
+                                flags.add(KEYWORD2FLAG[kw])
+                        self.imap.set_flags(uids, flags, silent=True)
 
                 if 'mailboxIds' in action:
-                    mboxes = [idmap[k] for k in action['mailboxIds'].keys()]
+                    mboxes = [idmap.get(k, k) for k in action['mailboxIds'].keys()]
                     # existing ifolderids containing this message
                     # identify a source message to work from
                     ifolderid = sorted(map[msgid])[0]
@@ -588,6 +594,7 @@ class ImapDB(DB):
                         )
             except Exception as e:
                 notchanged[msgid] = {'type': 'error', 'description': str(e)}
+                raise e
             else:
                 changed[msgid] = None
 
@@ -636,12 +643,12 @@ class ImapDB(DB):
         self.dinsert('imessages', {
             'ifolderid': ifolderid,
             'uid': uid,
-            'flags': json.dumps([f.decode() for f in flags if f.lower() != b'\\recent']),
+            'flags': json.dumps(sorted(flags)),
             'labels': json.dumps(sorted(labels)),
-            'internaldate': internaldate,
+            'internaldate': internaldate.isoformat(),
             'msgid': msgid,
             'thrid': thrid,
-            'envelope': json.dumps(envelope),
+            'envelope': json.dumps(envelope, default=jsonDefault),
             'size': size,
         })
         self.mark_sync(msgid)
@@ -658,12 +665,7 @@ class ImapDB(DB):
         keywords = {}
         for flag in flags:
             flag = flag.lower()
-            for kw, f in KEYWORD2FLAG:
-                if flag == f:
-                    keywords[kw] = True
-                    break
-                else:
-                    keywords[flag] = True
+            keywords[FLAG2KEYWORD.get(flag, flag)] = True
         
         slabels = self.labels()
         print('labels', labels)
@@ -801,9 +803,9 @@ class ImapDB(DB):
             data = self.dgetone('jmailboxes', {'jmailboxid': jid})
             for key in mailbox.keys():  # TODO: check if valid
                 data[key] = update[key]
-            parentId = data.get('parentId', None)
+            parentId = data['parentId']
             if parentId:
-                parentId = idmap[parentId]
+                parentId = idmap.get(parentId, parentId)
             
             try:
                 encname = data['name'].encode('IMAP-UTF-7')
@@ -896,7 +898,7 @@ class ImapDB(DB):
         createmap = {}
         notcreated = {}
         for cid, sub in new.items():
-            msgid = idmap[sub['emailId']]
+            msgid = idmap.get(sub['emailId'], sub['emailId'])
             if not msgid:
                 notcreated[cid] = {'error': 'nos msgid provided'}
                 continue
@@ -905,7 +907,7 @@ class ImapDB(DB):
                 notcreated[cid] = {'error': 'message does not exist'}
                 continue
             id = self.dmake('jsubmission', {
-                'sendat': datetime.fromisoformat()(sub['sendAt']) if sub['sendAt'] else time(),
+                'sendat': datetime.fromisoformat()(sub['sendAt']).isoformat() if sub['sendAt'] else datetime.now().isoformat(),
                 'msgid': msgid,
                 'thrid': thrid,
                 'envelope': json.dumps(sub['envelope']) if 'envelope' in sub else None,
@@ -1096,7 +1098,7 @@ def _envelopedata(data):
         pass
     sortsub = _normalsubject(encsub)
     return {
-        'msgdate': envelope['Date'],
+        'msgdate': datetime.fromisoformat(envelope['Date']).isoformat(),
         'msgsubject': encsub,
         'sortsubject': sortsub,
         'msgfrom': json.dumps(envelope.get('From', [])),
@@ -1111,3 +1113,28 @@ def _envelopedata(data):
 def _trimh(val):
     "DEPRECATED: Use directly val.strip()"
     return val.strip()
+
+def jsonDefault(obj):
+    if isinstance(obj, Envelope):
+        envelope = {'Date': obj.date}
+        if obj.subject:
+            envelope['Subject'] = obj.subject.decode()
+        if obj.in_reply_to:
+            envelope['In-Reply-To'] = obj.in_reply_to.decode()
+        if obj.message_id:
+            envelope['Message-ID'] = obj.message_id.decode()
+        for field, attr in [
+                ('Sender', 'sender'),
+                ('Reply-To', 'reply_to'),
+                ('From', 'from_'),
+                ('To', 'to'),
+                ('Cc', 'cc'),
+                ('Bcc', 'bcc')]:
+            if getattr(obj, attr):
+                envelope[field] = [{
+                    'name': a.name and str(make_header(decode_header(a.name.decode()))),
+                    'email': (b'%s@%s' % (a.mailbox, a.host)).decode(),
+                    } for a in getattr(obj, attr)]
+        return envelope
+
+    raise TypeError

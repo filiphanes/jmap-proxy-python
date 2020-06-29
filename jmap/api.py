@@ -443,6 +443,43 @@ class JmapApi:
             'changedProperties': ["totalEmails", "unreadEmails", "totalThreads", "unreadThreads"] if only_counts else None,
         }
     
+    def _patchitem(self, item, path: str, val=None):
+        try:
+            prop, path = path.split('/', maxsplit=1)
+            return self._patchitem(item[prop], path, val)
+        except ValueError:
+            if val is not None:
+                item[path] = val
+            elif path in item:
+                del item[path]
+    
+    def _resolve_patch(self, accountId, update, get_data):
+        for id, item in update.items():
+            properties = {}
+            for path in item.keys():
+                try:
+                    prop, _ = path.split('/', maxsplit=1)
+                except ValueError:
+                    continue
+                if prop in properties:
+                    properties[prop].append(path)
+                else:
+                    properties[prop] = [path]
+            if not properties:
+                continue  # nothing patched in this one
+
+            data = get_data(accountId, ids=[id], properties=properties.keys())
+            try:
+                data = data['list'][0]
+            except KeyError:
+                # XXX - if nothing in the list we SHOULD abort
+                continue
+            for prop, paths in properties.items():
+                item[prop] = data[prop]
+                for path in paths:
+                    self._patchitem(item, path, item.pop(path))
+        
+
     def _post_sort(self, data, sortargs, storage):
         return data
         # TODO: sort key function
@@ -590,9 +627,9 @@ class JmapApi:
     def api_Email_query(self, accountId, position=None, anchor=None,
                         anchorOffset=None, sort={}, filter={}, limit=10,
                         collapseThreads=False, calculateTotal=False):
-        user = self.db.get_user()
         if accountId and accountId != self.db.accountid:
             raise AccountNotFound()
+        user = self.db.get_user()
         newQueryState = user['jstateEmail']
         if position is not None and anchor is not None:
             raise ValueError('invalid arguments')
@@ -645,9 +682,9 @@ class JmapApi:
             properties=None,
             bodyProperties=None,
             fetchHTMLBodyValues=False):
-        user = self.db.get_user()
         if accountId and accountId != self.db.accountid:
             raise AccountNotFound()
+        user = self.db.get_user()
         newState = user['jstateEmail']
         seenids = set()
         notFound = []
@@ -707,11 +744,11 @@ class JmapApi:
             if 'subject' in properties:
                 msg['subject'] = data['msgsubject']
             if 'sentAt' in properties:
-                msg['sentAt'] = datetime.fromisoformat(data['msgdate'])
+                msg['sentAt'] = data['msgdate']
             if 'size' in properties:
                 msg['size'] = data['msgsize']
             if 'receivedAt' in properties:
-                msg['receivedAt'] = datetime.fromisoformat(data['internaldate'])
+                msg['receivedAt'] = data['internaldate']
             if 'blobId' in properties:
                 msg['blobId'] = msgid
             
@@ -744,6 +781,91 @@ class JmapApi:
             'list': lst,
             'state': newState,
             'notFound': notFound
+        }
+    
+    def getRawBlob(self, selector):
+        blobId, filename = selector.split('/', maxsplit=1)
+        typ, data = self.db.get_blob(blobId)
+        return typ, data, filename
+    
+    def uploadFile(self, accountid, typ, content):
+        return self.db.put_file(accountid, typ, content)
+
+    def downloadFile(self, jfileid):
+        return self.db.get_file(jfileid)
+    
+    def api_Email_changes(self, accountId, sinceState, maxChanges=None):
+        if accountId and accountId != self.db.accountid:
+            raise AccountNotFound()
+
+        user = self.db.get_user()
+        newState = user['jstateEmail']
+
+        if user['jdeletedmodseq'] and sinceState <= user['deletedmodseq']:
+            raise CannotCalculateChanges(f'new_state: {newState}')
+        
+        rows = self.db.dget('jmessages', {'jmodseq': ('>', sinceState)},
+                            'msgid,active,jcreated')
+        if maxChanges and len(rows) > maxChanges:
+            raise CannotCalculateChanges(f'new_state: {newState}')
+
+        created = []
+        updated = []
+        removed = []
+        for msgid, active, jcreated in rows:
+            if active:
+                if jcreated <= sinceState:
+                    updated.append(msgid)
+                else:
+                    created.append(msgid)
+            elif jcreated <= sinceState:
+                removed.append(msgid)
+            # else never seen
+        
+        return {
+            'accountId': accountId,
+            'oldState': sinceState,
+            'newState': newState,
+            'created': created,
+            'updated': updated,
+            'removed': removed,
+        }
+
+    def api_Email_set(self, accountId, create={}, update={}, destroy=()):
+        if accountId and accountId != self.db.accountid:
+            raise AccountNotFound()
+        # scoped_lock = self.db.begin_superlock()
+
+        # get state up-to-date first
+        self.db.sync_imap()
+        user = self.db.get_user()
+        oldState = user['jstateEmail']
+        created, notCreated = self.db.create_messages(create, self.idmap)
+        for id, msg in created.items():
+            self.setid(id, msg['id'])
+
+        self._resolve_patch(accountId, update, self.api_Email_get)
+        updated, notUpdated = self.db.update_messages(update, self._idmap)
+        destroyed, notDestroyed = self.db.destroy_messages(destroy)
+
+        # XXX - cheap dumb racy version
+        self.db.sync_imap()
+        user = self.db.get_user()
+        newState = user['jstateEmail']
+
+        for cid, msg in created.items():
+            created[cid]['blobId'] = msg['id']
+        
+        return {
+            'accountId': accountId,
+            'oldState': oldState,
+            'newState': newState,
+            'created': created,
+            'notCreated': notCreated,
+            'updated': updated,
+            'notUpdated': notUpdated,
+            'destroyed': destroyed,
+            'notDestroyed': notDestroyed,
         }
 
 
@@ -819,10 +941,7 @@ class JmapApi:
         self._idmap[f'#{key}'] = val
     
     def idmap(self, key):
-        if key:
-            return self._idmap.get(key, key)
-        else:
-            return None
+        return self._idmap.get(key, key)
 
     def begin(self):
         self.db.begin()

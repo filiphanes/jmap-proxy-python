@@ -34,7 +34,8 @@ class DB:
         self.accountid = accountid
         self.dbpath = os.path.join(path, accountid + '.db')
         print('Opening dbh', self.dbpath)
-        self.dbh = sqlite3.connect(self.dbpath)
+        self.dbh = sqlite3.connect(self.dbpath, isolation_level='DEFERRED')
+        self.dbh.execute("PRAGMA journal_mode=WAL")
         self.dbh.row_factory = sqlite3.Row
         self._initdb()
         self.cursor = self.dbh.cursor()
@@ -139,11 +140,11 @@ class DB:
         if not hasattr(self, 'user'):
             self.cursor.execute("SELECT * FROM account LIMIT 1")
             row = self.cursor.fetchone()
-            self.user = dict(row) if row else row
-        # bootstrap
-        if not self.user:
-            self.user = {'jhighestmodseq': 1}
-            self.cursor.execute("INSERT INTO account (jhighestmodseq) VALUES (?)", [self.user['jhighestmodseq']])
+            if row:
+                self.user = dict(row)
+            else:
+                self.cursor.execute("INSERT INTO account (jhighestmodseq) VALUES (?)", [self.user['jhighestmodseq']])
+                return self.get_user()
         return self.user
 
     def touch_thread_by_msgid(self, msgid):
@@ -248,7 +249,8 @@ class DB:
         old = set(oldids)
 
         for jmailboxid in newids:
-            if old.pop(jmailboxid):
+            if jmailboxid in old:
+                old.remove(jmailboxid)
                 # just bump the modseq
                 if bump:
                     self.update_mailbox_counts(jmailboxid, data['jmodseq'])
@@ -282,7 +284,7 @@ class DB:
         for cid, item in args.items():
             mailboxIds = item.pop('mailboxIds', ())
             keywords = item.pop('keywords', ())
-            item['msgdate'] = datetime.now()
+            item['msgdate'] = datetime.now().isoformat()
             item['headers']['Message-ID'] += '<' + str(uuid.uuid4()) + '.' + item['msgdate'] + os.getenv('jmaphost')
             message = email.make(item, self.get_blob())
             todo[cid] = (message, mailboxIds, keywords)
@@ -342,7 +344,7 @@ class DB:
         return '(' + ', '.join(args) + ')'
     
     def dinsert(self, table, values):
-        values['mtime'] = datetime.now()
+        values['mtime'] = datetime.now().isoformat()
         sql = f"INSERT OR REPLACE INTO {table} (" \
             + ','.join(values.keys()) \
             + ") VALUES (" \
@@ -361,7 +363,7 @@ class DB:
         return self.dinsert(table, values)
 
     def dupdate(self, table, values, filter={}):
-        values['mtime'] = datetime.now()
+        values['mtime'] = datetime.now().isoformat()
         sql = f'UPDATE {table} SET ' \
             + ', '.join([k + '=?' for k in values.keys()])
         if filter:
