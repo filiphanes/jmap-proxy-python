@@ -143,7 +143,9 @@ class DB:
             if row:
                 self.user = dict(row)
             else:
-                self.cursor.execute("INSERT INTO account (jhighestmodseq) VALUES (?)", [self.user['jhighestmodseq']])
+                self.cursor.execute("INSERT INTO account "
+                    " (email,displayname, jhighestmodseq) VALUES (?,?,?)",
+                    [self.accountid, self.accountid, 1])
                 return self.get_user()
         return self.user
 
@@ -153,7 +155,7 @@ class DB:
             thrid, = self.cursor.fetchone()
         except ValueError:  # not found
             return
-        self.cursor.execute("SELECT msgid,isDraft,msginreplyto,msgmessageid FROM jmessages WHERE thrid=? AND active=1", [thrid])
+        self.cursor.execute("SELECT msgid,isDraft,inReplyTo,messageId FROM jmessages WHERE thrid=? AND active=1", [thrid])
         messages = self.cursor.fetchall()
         if not messages:
             self.dmaybedirty('jthreads', {'active': 0, 'data': '[]'}, {'thrid': thrid})
@@ -163,16 +165,16 @@ class DB:
         msgs = []
         seenmsgs = set()
         for msg in messages:
-            if msg['isDraft'] and msg['msginreplyto']:
+            if msg['isDraft'] and msg['inReplyTo']:
                 # push the rest of the drafts to the end
-                drafts[msg['msginreplyto']].append(msg['msgid'])
+                drafts[msg['inReplyTo']].append(msg['msgid'])
 
         for msg in messages:
             if msg['isDraft']: continue
             msgs.append(msg['msgid'])
             seenmsgs.add(msg['msgid'])
-            if msg['msgmessageid']:
-                for draft in drafts.get(msg['msgmessageid'], ()):
+            if msg['messageId']:
+                for draft in drafts.get(msg['messageId'], ()):
                     msgs.append(draft)
                     seenmsgs.add(draft)
         # make sure unlinked drafts aren't forgotten!
@@ -284,8 +286,8 @@ class DB:
         for cid, item in args.items():
             mailboxIds = item.pop('mailboxIds', ())
             keywords = item.pop('keywords', ())
-            item['msgdate'] = datetime.now().isoformat()
-            item['headers']['Message-ID'] += '<' + str(uuid.uuid4()) + '.' + item['msgdate'] + os.getenv('jmaphost')
+            item['date'] = datetime.now().isoformat()
+            item['headers']['Message-ID'] += '<' + str(uuid.uuid4()) + '.' + item['date'] + os.getenv('jmaphost')
             message = email.make(item, self.get_blob())
             todo[cid] = (message, mailboxIds, keywords)
         
@@ -345,9 +347,9 @@ class DB:
     
     def dinsert(self, table, values):
         values['mtime'] = datetime.now().isoformat()
-        sql = f"INSERT OR REPLACE INTO {table} (" \
-            + ','.join(values.keys()) \
-            + ") VALUES (" \
+        sql = f"INSERT OR REPLACE INTO {table} (`" \
+            + '`,`'.join(values.keys()) \
+            + "`) VALUES (" \
             + ('?,' * len(values))[:-1] + ")"
         print(sql, values.values())
         cursor = self.cursor.execute(sql, list(values.values()))
@@ -479,20 +481,22 @@ class DB:
         CREATE TABLE IF NOT EXISTS jmessages (
             msgid TEXT PRIMARY KEY,
             thrid TEXT,
-            internaldate INTEGER,
+            sentAt INTEGER,
+            receivedAt INTEGER,
             sha1 TEXT,
             isDraft BOOL,
             isUnread BOOL,
             keywords TEXT,
-            msgfrom TEXT,
-            msgto TEXT,
-            msgcc TEXT,
-            msgbcc TEXT,
-            msgsubject TEXT,
-            msginreplyto TEXT,
-            msgmessageid TEXT,
-            msgdate INTEGER,
-            msgsize INTEGER,
+            `from` TEXT,
+            `to` TEXT,
+            cc TEXT,
+            bcc TEXT,
+            replyTo TEXT,
+            sender TEXT,
+            subject TEXT,
+            inReplyTo TEXT,
+            messageId TEXT,
+            size INTEGER,
             sortsubject TEXT,
             jcreated INTEGER,
             jmodseq INTEGER,
@@ -501,7 +505,7 @@ class DB:
         );""")
 
         self.dbh.execute("CREATE INDEX IF NOT EXISTS jthrid ON jmessages (thrid)")
-        self.dbh.execute("CREATE INDEX IF NOT EXISTS jmsgmessageid ON jmessages (msgmessageid)")
+        self.dbh.execute("CREATE INDEX IF NOT EXISTS jmessageid ON jmessages (messageId)")
 
         self.dbh.execute("""
         CREATE TABLE IF NOT EXISTS jthreads (

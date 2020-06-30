@@ -1,81 +1,167 @@
-import hashlib
+from datetime import datetime
 import email
 from email.header import decode_header, make_header
 from email.message import EmailMessage
+from email.policy import default
 from email.utils import format_datetime, getaddresses, parsedate_to_datetime
-from datetime import datetime
+import hashlib
 import re
+
+
+MEDIA_MAIN_TYPES = ('image', 'audio', 'video')
 
 
 def parse(rfc822, id=None):
     if id is None:
         id = hashlib.sha1(rfc822).hexdigest()
-    eml = email.message_from_bytes(rfc822)
-    res = parse_email(eml)
+    eml = email.message_from_bytes(rfc822, policy=default)
+    res = parse_email(id, eml)
     res['id'] = id
     res['size'] = len(rfc822)
     return res
 
 
-def parse_email(eml, part=None):
-    values = {}
-    bodyStructure = bodystructure(values, id, eml)
-    textBody, htmlBody, attachments = parseStructure(eml)
+def parse_email(id, eml, part=None):
+    bodyValues = {}
+    bodyStructure = bodystructure(bodyValues, id, eml)
+    textBody = []
+    htmlBody = []
+    attachments = []
+    parseStructure([bodyStructure], 'mixed', False, textBody, htmlBody, attachments)
     subject = str(make_header(decode_header(eml['Subject'])))
     return {
-        'from': asAddresses(eml.get_all('From', [])),
-        'to': asAddresses(eml.get_all('To', [])),
-        'cc': asAddresses(eml.get_all('Cc', [])),
-        'bcc': asAddresses(eml.get_all('Bcc', [])),
-        'replyTo': asAddresses(eml.get_all('Reply-To', [])),
+        'from': asAddresses(eml['From']),
+        'to': asAddresses(eml['To']),
+        'cc': asAddresses(eml['Cc']),
+        'bcc': asAddresses(eml['Bcc']),
+        'replyTo': asAddresses(eml['Reply-To']),
         'subject': subject,
         'date': asDate(eml['Date']),
-        'preview': (textBody[0] or htmltotext(htmlBody[0])).strip()[:256],
+        'preview': preview(bodyValues),
         'hasAttachment': len(attachments),
-        'headers': dict(eml),
+        'headers': headers(eml),
         'bodyStructure': bodyStructure,
-        'bodyValues': values,
+        'bodyValues': bodyValues,
         'textBody': textBody,
         'htmlBody': htmlBody,
         'attachments': attachments,
     }
 
 
-def bodystructure(values, id, eml, partno=None):
-    parts = []  # eml.get_content()
-    typ = eml.get_content_type()
-    # TODO ...
+def bodystructure(bodyValues, id, eml, partno=None):
+    hdrs = headers(eml)
+    typ = eml.get_content_type().lower()
+
+    if eml.is_multipart():
+        subParts = []
+        for n, part in enumerate(eml.iter_parts()):
+            subParts.append(bodystructure(bodyValues, id, part, f"{partno}.{n}" if partno else str(n)))
+        return {
+            'partId': None,
+            'blobId': None,
+            'type': typ,
+            'size': 0,
+            'headers': hdrs,
+            'name': None,
+            'cid': None,
+            'disposition': 'none',
+            'subParts': subParts,
+        }
+
+    partno = partno or '1'
+    body = eml.get_content()
+    if typ.startswith('text/'):
+        bodyValues[partno] = {'value': body, 'type': typ}
+    return {
+        'partId': partno,
+        'blobId': f"m-{id}-{partno}",
+        'type': typ,
+        'size': len(body),
+        'headers': hdrs,
+        'name': eml.get_filename(),
+        'cid': asOneURL(eml['Content-ID']),
+        'language': asCommaList(eml['Content-Language']),
+        'location': asText(eml['Content-Location']),
+        'disposition': eml.get_content_disposition() or 'none',
+    }
 
 
-def parseStructure(eml):
-    textBody = []
-    htmlBody = []
-    attachments = []
-    for part in eml.walk():
-        typ = part.get_content_type()
-        if part.get_content_disposition() == 'attachment':
+def parseStructure(parts, multipartType, inAlternative, textBody, htmlBody, attachments):
+    textLen = len(textBody) or -1
+    htmlLen = len(htmlBody) or -1
+
+    for i, part in enumerate(parts):
+        maintype, subtype = part['type'].split('/', maxsplit=1)
+        isInline = part['disposition'] != 'attachment' and \
+            (part['type'] in ('text/plain', 'text/html') or maintype in MEDIA_MAIN_TYPES) and \
+            (i == 0 or (multipartType != 'related' and (maintype in MEDIA_MAIN_TYPES or not part['name'])))
+        if maintype == 'multipart':
+            parseStructure(part['subParts'], subtype, inAlternative or (subtype == 'alternative'), htmlBody, textBody, attachments)
+        elif isInline:
+            if multipartType == 'alternative':
+                if part['type'] == 'text/plain':
+                    textBody.append(part)
+                elif part['type'] == 'text/html':
+                    htmlBody.append(part)
+                else:
+                    attachments.append(part)
+                continue
+            elif inAlternative:
+                if part['type'] == 'text/plain':
+                    textBody = None
+                elif part['type'] == 'text/html':
+                    htmlBody = None
+            if textBody:
+                textBody.append(part)
+            if htmlBody:
+                htmlBody.append(part)
+            if (not textBody or not htmlBody) and maintype in MEDIA_MAIN_TYPES:
+                attachments.append(part)
+        else:
             attachments.append(part)
-        elif typ == 'text/plain':
-            payload = part.get_payload(decode=True)
-            textBody.append(payload.decode())
-        elif typ == 'text/html':
-            payload = part.get_payload(decode=True)
-            htmlBody.append(payload.decode())
+    
+    if multipartType == 'alternative' and textBody and htmlBody:
+        if textLen == len(textBody) and htmlLen != len(htmlBody):
+            textBody.extend(htmlBody)
+        if textLen != len(textBody) and htmlLen == len(htmlBody):
+            htmlBody.extend(textBody)
 
-    return textBody, htmlBody, attachments
+def asMessageIds(val):
+    return val and [v.strip('<>') for v in asCommaList(val)]
 
+def asCommaList(val):
+    return val and re.split(r'\s*,\s*', val.strip())
 
 def asDate(val):
     return parsedate_to_datetime(val)
 
+def asURLs(val):
+    return val and re.split(r'>?\s*,?\s*<?', val.strip())
 
-def asAddresses(hdrs):
-    return [{
-        'name': str(make_header(decode_header(n))),
-        'email': e,
-    }
-        for n,e in getaddresses(hdrs)]
+def asOneURL(val):
+    return val and val.strip("<>")
 
+def asText(val):
+    return val and str(make_header(decode_header(val))).strip()    
+
+def asAddresses(hdr):
+    return hdr and [{
+        'name': str(a.display_name),
+        'email': f"{a.username}@{a.domain}",
+    } for a in hdr.addresses]
+
+def headers(eml):
+    return [{'name': k, 'value': v} for k, v in eml.items()]
+
+def preview(bodyValues):
+    for part in bodyValues.values():
+        if part['type'] == 'text/plain':
+            return part['value'][256:]
+    for part in bodyValues.values():
+        if part['type'] == 'text/html':
+            return htmltotext(part['value'])[256:]
+    return None
+    
 
 def htmltotext(html):
     # TODO: remove html tags ...

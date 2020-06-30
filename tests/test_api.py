@@ -62,15 +62,15 @@ def test_Email_query_inMailbox(api):
 def test_Email_get(api):
     properties = {
         'threadId', 'mailboxIds', 'inReplyToEmailId', 'keywords', 'subject',
-        'sentAt', 'receivedAt', 'size', 'blobId', #'replyTo',
-        'from', 'to', 'cc', 'bcc',
+        'sentAt', 'receivedAt', 'size', 'blobId',
+        'from', 'to', 'cc', 'bcc', 'replyTo',
         'attachments', 'hasAttachment',
         'headers', 'preview', 'body', 'textBody', 'htmlBody',
     }
     res = api.handle_request({"methodCalls": [
         ["Email/get", {
             "accountId": "u1",
-            "ids": ["ma854e1c42", "me400ec47d"],
+            "ids": ["mdfe661a66", "me400ec47d"],
             "properties": list(properties),
         }, "1"]
     ]})
@@ -87,14 +87,47 @@ def test_Email_get(api):
             for prop in properties - {'body'}:
                 assert prop in msg
 
+def test_Email_get_detail(api):
+    properties = {
+        "blobId", "messageId", "inReplyTo", "references",
+        "header:list-id:asText", "header:list-post:asURLs",
+        "sender", "cc", "bcc", "replyTo", "sentAt",
+        "bodyStructure", "bodyValues",
+    }
+    bodyProperties = [
+        "partId", "blobId", "size", "name", "type",
+        "charset", "disposition", "cid", "location",
+    ]
+    res = api.handle_request({"methodCalls": [
+        ["Email/get", {
+            "accountId": "u1",
+            "ids": ["m9dda32a70"],
+            "properties": list(properties),
+            "fetchHTMLBodyValues": True,
+            "bodyProperties": bodyProperties,
+        }, "0"]
+    ]})
+    assert len(res['methodResponses']) == 1
+    for method, response, tag in res['methodResponses']:
+        assert method == "Email/get"
+        assert tag == "0"
+        assert response['accountId'] == "u1"
+        assert isinstance(response['notFound'], list)
+        assert len(response['notFound']) == 0
+        assert isinstance(response['list'], list)
+        assert len(response['list']) == 1
+        for msg in response['list']:
+            for prop in properties - {'body'}:
+                assert prop in msg
+
 
 def test_Email_set(api):
     res = api.handle_request({"methodCalls": [
         ["Email/set", {
             "accountId": "u1",
             "update": {
-                "mb3585e9ba": {
-                    "keywords/$seen": True
+                "mdfe661a66": {
+                    "keywords/$seen": None
                 }
             }
         }, "0"]

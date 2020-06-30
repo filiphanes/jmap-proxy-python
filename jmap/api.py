@@ -3,7 +3,7 @@ import time
 import re
 from datetime import datetime
 from collections import defaultdict
-from jmap.email import htmltotext
+from jmap.email import asAddresses, asDate, asMessageIds, asText, asURLs, htmltotext
 try:
     import orjson as json
 except ImportError:
@@ -471,7 +471,7 @@ class JmapApi:
             data = get_data(accountId, ids=[id], properties=properties.keys())
             try:
                 data = data['list'][0]
-            except KeyError:
+            except (KeyError, IndexError):
                 # XXX - if nothing in the list we SHOULD abort
                 continue
             for prop, paths in properties.items():
@@ -485,13 +485,13 @@ class JmapApi:
         # TODO: sort key function
         fieldmap = {
             'id': ('msgid', 0),
-            'receivedAt': ('internaldate', 1),
-            'sentAt': ('msgdate', 1),
-            'size': ('msgsize', 1),
-            'isunread': ('isUnread', 1),
+            'receivedAt': ('receivedAt', 1),
+            'sentAt': ('sentAt', 1),
+            'size': ('size', 1),
+            'isUnread': ('isUnread', 1),
             'subject': ('sortsubject', 0),
-            'from': ('msgfrom', 0),
-            'to': ('msgto', 0),
+            'from': ('from', 0),
+            'to': ('to', 0),
         }
 
     def _load_mailbox(self, id):
@@ -681,7 +681,12 @@ class JmapApi:
             ids: list,
             properties=None,
             bodyProperties=None,
-            fetchHTMLBodyValues=False):
+            fetchTextBodyValues=False,
+            fetchHTMLBodyValues=False,
+            fetchAllBodyValues=False,
+            maxBodyValueBytes=0,
+        ):
+        """https://jmap.io/spec-mail.html#emailget"""
         if accountId and accountId != self.db.accountid:
             raise AccountNotFound()
         user = self.db.get_user()
@@ -691,12 +696,12 @@ class JmapApi:
         lst = []
         headers_wanted = set()
         content_props = {'attachments', 'hasAttachment', 'headers', 'preview',
-                         'body', 'textBody', 'htmlBody', 'bodyValues'}
+                         'body', 'textBody', 'htmlBody', 'bodyValues', 'references'}
         if properties:
             need_content = False
             for prop in properties:
-                if prop.startswith('headers.'):
-                    headers_wanted.add(prop[8:])
+                if prop.startswith('header:'):
+                    headers_wanted.add(prop)
                     need_content = True
                 elif prop in content_props:
                     need_content = True
@@ -704,7 +709,7 @@ class JmapApi:
             properties = content_props + {
                 'threadId', 'mailboxIds',
                 'hasAttachemnt', 'keywords', 'subject', 'sentAt',
-                'receivedAt', 'size', 'blobId', 'replyTo'
+                'receivedAt', 'size', 'blobId',
                 'from', 'to', 'cc', 'bcc', 'replyTo',
                 'messageId', 'inReplyTo', 'references', 'sender',
             }
@@ -729,28 +734,24 @@ class JmapApi:
                     continue
 
             msg = {'id': msgid}
+            if 'blobId' in properties:
+                msg['blobId'] = msgid
             if 'threadId' in properties:
                 msg['threadId'] = data['thrid']
             if 'mailboxIds' in properties:
                 ids = self.db.dgetcol('jmessagemap', {'msgid': msgid, 'active': 1}, 'jmailboxid')
                 msg['mailboxIds'] = {i: True for i in ids}
-            if 'inReplyToEmailId' in properties:
-                msg['inReplyToEmailId'] = data['msginreplyto']
             if 'keywords' in properties:
                 msg['keywords'] = json.loads(data['keywords'])
-            for prop in ('from', 'to', 'cc', 'bcc'):
+            if 'messageId' in properties:
+                msg['messageId'] = data['messageid'] and [data['messageid']]
+
+            for prop in ('from', 'to', 'cc', 'bcc', 'replyTo', 'sender'):
                 if prop in properties:
-                    msg[prop] = json.loads(data['msg' + prop])
-            if 'subject' in properties:
-                msg['subject'] = data['msgsubject']
-            if 'sentAt' in properties:
-                msg['sentAt'] = data['msgdate']
-            if 'size' in properties:
-                msg['size'] = data['msgsize']
-            if 'receivedAt' in properties:
-                msg['receivedAt'] = data['internaldate']
-            if 'blobId' in properties:
-                msg['blobId'] = msgid
+                    msg[prop] = json.loads(data[prop])
+            for prop in ('subject', 'size', 'inReplyTo', 'sentAt', 'receivedAt'):
+                if prop in properties:
+                    msg[prop] = data[prop]
             
             if msgid in contents:
                 data = contents[msgid]
@@ -768,11 +769,51 @@ class JmapApi:
                     msg['hasAttachment'] = bool(data['hasAttachment'])
                 if 'headers' in properties:
                     msg['headers'] = data['headers']
-                elif headers_wanted:
-                    msg['headers'] = {}
-                    for hdr in headers_wanted:
-                        if hdr in data['headers']:
-                            msg['headers'][hdr.lower()] = data['headers'][hdr]
+                if 'bodyStructure' in properties:
+                    msg['bodyStructure'] = data['bodyStructure']
+                if 'references' in properties:
+                    for hdr in data['headers']:
+                        if hdr['name'].lower() == 'references':
+                            msg['references'] = asMessageIds(hdr['value'])
+                            break
+                    else:
+                        msg['references'] = []
+                if 'bodyValues' in properties:
+                    if fetchAllBodyValues:
+                        msg['bodyValues'] = data['bodyValues']
+                    elif fetchHTMLBodyValues:
+                        msg['bodyValues'] = {k: v for k, v in data['bodyValues'].items() if v['type'] == 'text/html'}
+                    elif fetchTextBodyValues:
+                        msg['bodyValues'] = {k: v for k, v in data['bodyValues'].items() if v['type'] == 'text/plain'}
+                    if maxBodyValueBytes:
+                        for val in msg['bodyValues'].values():
+                            val['value'] = val['value'][:maxBodyValueBytes]
+                            val['isTruncated'] = True
+
+                for prop in headers_wanted:
+                    try:
+                        _, field, form = prop.split(':')
+                    except ValueError:
+                        field, form = prop[8:], 'raw'
+                    field = field.lower()
+                    if form == 'all':
+                        msg[prop] = [v for k, v in data['headers'] if k.lower() == field]
+                        continue
+                    elif form == 'asDate':
+                        func = asDate
+                    elif form == 'asText':
+                        func = asText
+                    elif form == 'asURLs':
+                        func = asURLs
+                    elif form == 'asAddresses':
+                        func = asAddresses
+
+                    for hdr in data['headers']:
+                        if hdr['name'].lower() == field:
+                            msg[prop] = func(hdr['value'])
+                            break
+                    else:
+                        msg[prop] = None
 
             lst.append(msg)
 

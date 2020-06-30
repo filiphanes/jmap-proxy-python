@@ -59,7 +59,7 @@ KEYWORD2FLAG = {
     '$draft': '\\Draft',
     '$seen': '\\Seen',
 }
-FLAG2KEYWORD = {f.lower(): kw for f, kw in KEYWORD2FLAG.items()}
+FLAG2KEYWORD = {f.lower(): kw for kw, f in KEYWORD2FLAG.items()}
 
 
 class ImapDB(DB):
@@ -279,10 +279,9 @@ class ImapDB(DB):
         for ifolderid, label, imapname, uidvalidity, highestmodseq in rows:
             status = self.imap.folder_status(imapname, ['UIDVALIDITY', 'HIGHESTMODSEQ'])
             # TODO: better handling of uidvalidity change?
-            if status[b'UIDVALIDITY'] == uidvalidity and \
-               status[b'HIGHESTMODSEQ'] == highestmodseq:
-                continue
-            self.do_folder(ifolderid, label)
+            if status[b'UIDVALIDITY']   != uidvalidity or \
+               status[b'HIGHESTMODSEQ'] != highestmodseq:
+                self.do_folder(ifolderid, label)
         self.sync_jmap()
 
     def backfill(self):
@@ -304,7 +303,7 @@ class ImapDB(DB):
         self.cursor.execute('SELECT ifolderid, label FROM ifolders'
                             ' WHERE UPPER(imapname) = "INBOX" LIMIT 1')
         for ifolderid, label in self.cursor.fetchall():
-            self.do_folder(ifolderid, label, 100)
+            self.do_folder(ifolderid, label, 10000)
         self.sync_jmap()
         
     def calcmsgid(self, imapname, uid, msg):
@@ -341,7 +340,7 @@ class ImapDB(DB):
 
         imapname, uidfirst, uidnext, uidvalidity, highestmodseq = data
         uidfirst = uidfirst or 1
-        highestmodseq = 0 # comment in production
+        highestmodseq = 1 # comment in production
         fetch_data = 'UID FLAGS INTERNALDATE ENVELOPE RFC822.SIZE'.split()
         fetch_modifiers = (f'CHANGEDSINCE {highestmodseq}',)
 
@@ -374,7 +373,7 @@ class ImapDB(DB):
             new = {}
             update = {}
             self.backfilling = True
-            backfill = self.imap.fetch((uidfirst, end), fetch_data, fetch_modifiers)
+            backfill = self.imap.fetch(f'{uidfirst}:{end}', fetch_data, fetch_modifiers)
         else:
             return
         print('fetch_data:', fetch_data)
@@ -681,9 +680,9 @@ class ImapDB(DB):
             msg = self.cursor.fetchone()
             return self.add_message({
                 'msgid': msgid,
-                'internaldate': msg['internaldate'],
+                'receivedAt': msg['internaldate'],
                 'thrid': msg['thrid'],
-                'msgsize': msg['size'],
+                'size': msg['size'],
                 'keywords': keywords,
                 'isDraft': '$draft' in keywords,
                 'isUnread': '$seen' not in keywords,
@@ -1098,21 +1097,19 @@ def _envelopedata(data):
         pass
     sortsub = _normalsubject(encsub)
     return {
-        'msgdate': datetime.fromisoformat(envelope['Date']).isoformat(),
-        'msgsubject': encsub,
+        'sentAt': datetime.fromisoformat(envelope['Date']).isoformat(),
+        'subject': encsub,
         'sortsubject': sortsub,
-        'msgfrom': json.dumps(envelope.get('From', [])),
-        'msgto': json.dumps(envelope.get('To', [])),
-        'msgcc': json.dumps(envelope.get('Cc', [])),
-        'msgbcc': json.dumps(envelope.get('Bcc', [])),
-        'msginreplyto': envelope.get('In-Reply-To', None),
-        'msgmessageid': envelope.get('Message-ID', None),
+        'sender': json.dumps(envelope.get('Sender', [])),
+        'from': json.dumps(envelope.get('From', [])),
+        'to': json.dumps(envelope.get('To', [])),
+        'cc': json.dumps(envelope.get('Cc', [])),
+        'bcc': json.dumps(envelope.get('Bcc', [])),
+        'replyTo': json.dumps(envelope.get('Reply-To', [])),
+        'inReplyto': envelope.get('In-Reply-To', None),
+        'messageId': envelope.get('Message-ID', None),
     }
 
-
-def _trimh(val):
-    "DEPRECATED: Use directly val.strip()"
-    return val.strip()
 
 def jsonDefault(obj):
     if isinstance(obj, Envelope):
