@@ -1,5 +1,5 @@
-import base64
-import binascii
+import asyncio
+import os
 
 try:
     import orjson as json
@@ -9,86 +9,134 @@ except ImportError:
     OPT_INDENT_2 = None
 
 from starlette.applications import Starlette
-from starlette.authentication import (
-    AuthenticationBackend, AuthenticationError, SimpleUser,
-    UnauthenticatedUser, AuthCredentials
-)
 from starlette.middleware import Middleware
 from starlette.middleware.authentication import AuthenticationMiddleware
 from starlette.middleware.cors import CORSMiddleware
-from starlette.responses import Response, PlainTextResponse, StreamingResponse
+from starlette.responses import PlainTextResponse, Response, StreamingResponse
 from starlette.routing import Route, Mount
 from starlette.staticfiles import StaticFiles
 
-from jmap.api import JmapApi
-from account import AccountManager
-import asyncio
-from time import time
+from user import BasicAuthBackend
 
-accounts = AccountManager()
+class JSONResponse(Response):
+    media_type = "application/json"
 
-class BasicAuthBackend(AuthenticationBackend):
-    async def authenticate(self, request):
-        if "Authorization" not in request.headers:
-            return
-        auth = request.headers["Authorization"]
-        try:
-            scheme, credentials = auth.split()
-            if scheme.lower() != 'basic':
-                return
-            decoded = base64.b64decode(credentials).decode("ascii")
-        except (ValueError, UnicodeDecodeError, binascii.Error) as exc:
-            raise AuthenticationError('Invalid basic auth credentials')
+    def render(self, content) -> bytes:
+        return json.dumps(
+            content,
+            option=OPT_INDENT_2,
+        )
 
-        username, _, password = decoded.partition(":")
-        # TODO: You'd want to verify the username and password here.
-        return AuthCredentials(["authenticated"]), SimpleUser(username)
+
+BASEURL = os.getenv('BASEURL', 'http://127.0.0.1:8888')
+async def well_known_jmap(request):
+    res = {
+        "capabilities": {
+            "urn:ietf:params:jmap:submission": {},
+            "urn:ietf:params:jmap:vacationresponse": {},
+            "urn:ietf:params:jmap:mail": {},
+            "urn:ietf:params:jmap:core": {
+                "collationAlgorithms": [
+                    "i;ascii-numeric",
+                    "i;ascii-casemap",
+                    "i;octet"
+                ],
+                "maxCallsInRequest": 64,
+                "maxObjectsInGet": 1000,
+                "maxSizeUpload": 250000000,
+                "maxConcurrentRequests": 10,
+                "maxObjectsInSet": 1000,
+                "maxConcurrentUpload": 10,
+                "maxSizeRequest": 10000000
+            }
+        },
+        "username": request.user.username,
+        "accounts": {
+            request.user.username: {
+                "name": request.user.display_name,
+                "isPersonal": True,
+                "isArchiveUser": False,
+                "accountCapabilities": {
+                    "urn:ietf:params:jmap:vacationresponse": {},
+                    "urn:ietf:params:jmap:submission": {
+                        "submissionExtensions": [],
+                        "maxDelayedSend": 44236800
+                    },
+                    "urn:ietf:params:jmap:mail": {
+                        "maxSizeMailboxName": 490,
+                        "maxSizeAttachmentsPerEmail": 50000000,
+                        "mayCreateTopLevelMailbox": True,
+                        "maxMailboxesPerEmail": 1000,
+                        "maxMailboxDepth": None,
+                        "emailQuerySortOptions": [
+                            "receivedAt",
+                            "from",
+                            "to",
+                            "subject",
+                            "size",
+                            "header.x-spam-score"
+                        ]
+                    }
+                },
+                "isReadOnly": False
+            }
+        },
+        "primaryAccounts": {
+            "urn:ietf:params:jmap:submission": request.user.username,
+            "urn:ietf:params:jmap:vacationresponse": request.user.username,
+            "urn:ietf:params:jmap:mail": request.user.username
+        },
+        "state": "azetmail-0",  # TODO: fetch current state
+        "apiUrl": BASEURL + "/api/",
+        "downloadUrl": BASEURL + "/download/{accountId}/{blobId}/{name}?type={type}",
+        "uploadUrl": BASEURL + "/upload/{accountId}/",
+        "eventSourceUrl": BASEURL + "/event/?types={types}&closeafter={closeafter}&ping={ping}",
+    }
+    return JSONResponse(res)
 
 
 async def api(request):
-    if not request.user.is_authenticated:
-        raise AuthenticationError('User not authenticated')
     data = json.loads(await request.body())
-    db = accounts.get_db(request.user.username)
-    api = JmapApi(db)
-    res = api.handle_request(data)
-    body = json.dumps(res, option=OPT_INDENT_2)
-    return Response(body, 200, media_type='application/json')
+    res = request.user.jmap.handle_request(data)
+    return JSONResponse(res)
 
 
-async def events(request):
-    async def stream():
-        while True:
-            if await request.is_disconnected():
-                break
-            yield 'event: ping\ndata: %f\n\n' % (time(),)
-            await asyncio.sleep(60)
-    return StreamingResponse(stream(), 200, media_type='text/event-stream')
+async def event_stream(request, types, closeafter, ping):
+    while True:
+        if await request.is_disconnected():
+            break
+        if ping:
+            yield f'event: ping\ndata: {"interval":{ping}}\n\n'
+        await asyncio.sleep(ping or 10)
 
+async def event(request):
+    try:
+        types = request.query_params['types'].split(',')
+    except KeyError:
+        types = ['*']
+        # return Response('types param required', status_code=400)
+    try:
+        closeafter = request.query_params['closeafter']
+    except KeyError:
+        closeafter = ''
+        # return Response('closeafter param required', status_code=400)
+    try:
+        ping = int(request.query_params['ping'])
+    except (KeyError, ValueError):
+        ping = 0
+        # return Response('ping param required', status_code=400)
 
-async def firstsync(request):
-    accountid = request.path_params['accountid']
-    db = accounts.get_db(accountid)
-    db.firstsync()
-    return PlainTextResponse('Synced')
-
-
-async def syncall(request):
-    accountid = request.path_params['accountid']
-    db = accounts.get_db(accountid)
-    db.sync_folders()
-    db.sync_imap()
-    # db.sync_addressbooks()
-    # db.sync_calendars()
-    return PlainTextResponse('Synced')
+    return StreamingResponse(
+        event_stream(request, types, closeafter, ping),
+        200,
+        media_type='text/event-stream',
+    )
 
 
 routes = [
     Route('/api/', api, methods=["GET", "POST"]),
-    Route('/events/', events, methods=["GET", "POST"]),
-    Route('/firstsync/{accountid}', firstsync),
-    Route('/syncall/{accountid}', syncall),
-    Mount('/.well-known', StaticFiles(directory=".well-known", html=False)),
+    Route('/event/', event),
+    Route('/.well-known/jmap', well_known_jmap),
     Mount('/', StaticFiles(directory="web", html=True)),
 ]
 
@@ -97,4 +145,8 @@ middleware = [
     Middleware(AuthenticationMiddleware, backend=BasicAuthBackend()),
 ]
 
-app = Starlette(debug=True, routes=routes, middleware=middleware)
+app = Starlette(
+    debug=True,
+    routes=routes,
+    middleware=middleware,
+)

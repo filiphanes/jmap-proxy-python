@@ -63,20 +63,10 @@ FLAG2KEYWORD = {f.lower(): kw for kw, f in KEYWORD2FLAG.items()}
 
 
 class ImapDB(DB):
-    def __init__(self, accountid, *args, **kwargs):
-        super().__init__(accountid, *args, **kwargs)
-        config = self.dgetone('iserver')
-        if config:
-            username, password, host, port, *_ = config
-        else:
-            username = accountid
-            password = 'h'
-            host = 'localhost'
-            port = 143
-            # raise Exception('User has no configured IMAP connection')
+    def __init__(self, username, password='h', host='localhost', port=143, *args, **kwargs):
+        super().__init__(username, *args, **kwargs)
         self.imap = IMAPClient(host, port, use_uid=True, ssl=False)
         self.imap.login(username, password)
-        print('Login', username, password)
 
     def setuser(self, args):
         # TODO: picture, ...

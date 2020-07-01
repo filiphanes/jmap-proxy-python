@@ -1,17 +1,15 @@
-# test requests inspired by from https://jmap.io/client.html
-
 import pytest
 
 
-def test_Mailbox_get_all(api):
+def test_Mailbox_get_all(api, accountId):
     res = api.handle_request({"methodCalls": [
-        ["Mailbox/get", {"accountId": "u1", "ids": None}, "0"]
+        ["Mailbox/get", {"accountId": accountId, "ids": None}, "0"]
     ]})
     assert len(res['methodResponses']) == 1
     for method, response, tag in res['methodResponses']:
         assert method == "Mailbox/get"
         assert tag == "0"
-        assert response['accountId'] == "u1"
+        assert response['accountId'] == accountId
         assert int(response['state']) > 0
         assert isinstance(response['notFound'], list)
         assert len(response['notFound']) == 0
@@ -30,10 +28,10 @@ def test_Mailbox_get_all(api):
             assert 'parentId' in mailbox
 
 
-def test_Email_query_inMailbox(api):
+def test_Email_query_inMailbox(api, accountId):
     res = api.handle_request({"methodCalls": [
         ["Email/query", {
-            "accountId": "u1",
+            "accountId": accountId,
             "filter": {
                 "inMailbox": "75f21771-351f-43f6-bde0-4286ce638779"   # inbox
             },
@@ -47,7 +45,7 @@ def test_Email_query_inMailbox(api):
     for method, response, tag in res['methodResponses']:
         assert method == "Email/query"
         assert tag == "0"
-        assert response['accountId'] == "u1"
+        assert response['accountId'] == accountId
         assert response['position'] == 0
         assert response['total']
         assert response['collapseThreads'] == True
@@ -59,7 +57,7 @@ def test_Email_query_inMailbox(api):
         assert 'canCalculateChanges' in response
 
 
-def test_Email_get(api):
+def test_Email_get(api, accountId):
     properties = {
         'threadId', 'mailboxIds', 'inReplyToEmailId', 'keywords', 'subject',
         'sentAt', 'receivedAt', 'size', 'blobId',
@@ -87,7 +85,7 @@ def test_Email_get(api):
             for prop in properties - {'body'}:
                 assert prop in msg
 
-def test_Email_get_detail(api):
+def test_Email_get_detail(api, accountId):
     properties = {
         "blobId", "messageId", "inReplyTo", "references",
         "header:list-id:asText", "header:list-post:asURLs",
@@ -121,10 +119,10 @@ def test_Email_get_detail(api):
                 assert prop in msg
 
 
-def test_Email_set(api):
+def test_Email_set(api, accountId):
     res = api.handle_request({"methodCalls": [
         ["Email/set", {
-            "accountId": "u1",
+            "accountId": accountId,
             "update": {
                 "mdfe661a66": {
                     "keywords/$seen": None
@@ -136,7 +134,7 @@ def test_Email_set(api):
     for method, response, tag in res['methodResponses']:
         assert method == "Email/set"
         assert tag == "0"
-        assert response['accountId'] == "u1"
+        assert response['accountId'] == accountId
         assert isinstance(response['updated'], dict)
         assert isinstance(response['notUpdated'], dict)
         assert isinstance(response['created'], dict)
@@ -151,7 +149,7 @@ def test_Email_set(api):
         assert len(response['notDestroyed']) == 0
 
 
-def test_Email_query_first_page(api):
+def test_Email_query_first_page(api, accountId):
     properties = [
         "threadId", "mailboxIds", "subject", "receivedAt",
         "keywords", "hasAttachment", "from", "to", "preview",
@@ -159,7 +157,7 @@ def test_Email_query_first_page(api):
     res = api.handle_request({"methodCalls": [
         # First we do a query for the id of first 10 messages in the mailbox
         ["Email/query", {
-            "accountId": "u1",
+            "accountId": accountId,
             "filter": {
                 "inMailbox": "75f21771-351f-43f6-bde0-4286ce638779"   # inbox
             },
@@ -174,7 +172,7 @@ def test_Email_query_first_page(api):
 
         # Then we fetch the threadId of each of those messages
         ["Email/get", {
-            "accountId": "u1",
+            "accountId": accountId,
             "#ids": {
                 "name": "Email/query",
                 "path": "/ids",
@@ -185,7 +183,7 @@ def test_Email_query_first_page(api):
 
         # Next we get the emailIds of the messages in those threads
         ["Thread/get", {
-            "accountId": "u1",
+            "accountId": accountId,
             "#ids": {
                 "name": "Email/get",
                 "path": "/list/*/threadId",
@@ -195,7 +193,7 @@ def test_Email_query_first_page(api):
 
         # Finally we get the data for all those emails
         ["Email/get", {
-            "accountId": "u1",
+            "accountId": accountId,
             "#ids": {
                 "name": "Thread/get",
                 "path": "/list/*/emailIds",
@@ -220,14 +218,14 @@ def test_Email_query_first_page(api):
                     assert prop in msg
 
 
-def test_Email_query_second_page(api):
+def test_Email_query_second_page(api, accountId):
     properties = [
         "threadId", "mailboxIds", "subject", "receivedAt",
         "keywords", "hasAttachment", "from", "to", "preview",
     ]
     res = api.handle_request({"methodCalls": [
         [ "Email/query", {
-            "accountId": "u1",
+            "accountId": accountId,
             "filter": {
                 "inMailbox": "75f21771-351f-43f6-bde0-4286ce638779"   # inbox
             },
@@ -239,7 +237,7 @@ def test_Email_query_second_page(api):
             "limit": 10
         }, "0" ],
         [ "Email/get", {
-            "accountId": "u1",
+            "accountId": accountId,
             "#ids": {
                 "name": "Email/query",
                 "path": "/ids",
@@ -259,11 +257,11 @@ def test_Email_query_second_page(api):
                     assert prop in msg
 
 
-def test_Email_changes(api):
+def test_Email_changes(api, accountId):
     res = api.handle_request({"methodCalls": [
         # Fetch a list of created/updated/deleted Emails
         [ "Email/changes", {
-            "accountId": "u1",
+            "accountId": accountId,
             "sinceState": "1",
             "maxChanges": 30
         }, "0"],
@@ -271,11 +269,11 @@ def test_Email_changes(api):
     assert len(res['methodResponses']) == 2
 
 
-def test_Thread_changes(api):
+def test_Thread_changes(api, accountId):
     res = api.handle_request({"methodCalls": [
         # Fetch a list of created/udpated/deleted Threads
         [ "Thread/changes", {
-            "accountId": "u1",
+            "accountId": accountId,
             "sinceState": "1",
             "maxChanges": 30
         }, "0"],
@@ -283,16 +281,16 @@ def test_Thread_changes(api):
     assert len(res['methodResponses']) == 2
 
 
-def test_Mailbox_changes(api):
+def test_Mailbox_changes(api, accountId):
     res = api.handle_request({"methodCalls": [
         # Fetch a list of mailbox ids that have changed
         [ "Mailbox/changes", {
-            "accountId": "u1",
+            "accountId": accountId,
             "sinceState": "1"
         }, "0"],
         # Fetch any mailboxes that have been created
         [ "Mailbox/get", {
-            "accountId": "u1",
+            "accountId": accountId,
             "#ids": {
                 "name": "Mailbox/changes",
                 "path": "/created",
@@ -301,7 +299,7 @@ def test_Mailbox_changes(api):
         }, "1" ],
         # Fetch any mailboxes that have been updated
         [ "Mailbox/get", {
-            "accountId": "u1",
+            "accountId": accountId,
             "#ids": {
                 "name": "Mailbox/changes",
                 "path": "/updated",

@@ -2,9 +2,14 @@ import pytest
 
 
 @pytest.fixture
-def db():
+def accountId():
+    return 'u1'
+
+
+@pytest.fixture
+def db(accountId):
     from jmap.imapdb import ImapDB
-    return ImapDB("u1")
+    return ImapDB()
 
 
 @pytest.fixture
