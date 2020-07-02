@@ -1,6 +1,5 @@
 import pytest
 
-
 @pytest.fixture
 def accountId():
     return 'u1'
@@ -8,11 +7,12 @@ def accountId():
 
 @pytest.fixture
 def db(accountId):
-    from jmap.imapdb import ImapDB
-    return ImapDB()
+    from jmap.db import ImapDB
+    return ImapDB(accountId)
 
 
 @pytest.fixture
 def api(db):
-    from jmap.api import JmapApi
-    return JmapApi(db)
+    from jmap.api import Api, USING_MIXINS
+    bases = tuple(USING_MIXINS.values())
+    return type('API', bases, Api.__dict__)(db)

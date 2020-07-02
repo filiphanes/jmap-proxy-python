@@ -1,4 +1,4 @@
-from jmap import ImapDB
+from jmap.db import ImapDB
 
 
 def test_init():

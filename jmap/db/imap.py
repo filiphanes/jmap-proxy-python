@@ -1,5 +1,3 @@
-from jmap.db import DB
-from time import time
 import hashlib
 from collections import defaultdict
 import re
@@ -12,7 +10,9 @@ except ImportError:
 
 from imapclient import IMAPClient
 from imapclient.response_types import Envelope
-from jmap import email
+from jmap.mail import parse
+
+from .base import BaseDB
 from email.header import decode_header, make_header
 
 TAG = 1
@@ -62,7 +62,7 @@ KEYWORD2FLAG = {
 FLAG2KEYWORD = {f.lower(): kw for kw, f in KEYWORD2FLAG.items()}
 
 
-class ImapDB(DB):
+class ImapDB(BaseDB):
     def __init__(self, username, password='h', host='localhost', port=143, *args, **kwargs):
         super().__init__(username, *args, **kwargs)
         self.imap = IMAPClient(host, port, use_uid=True, ssl=False)
@@ -496,7 +496,7 @@ class ImapDB(DB):
         if not msgdata:
             raise Exception('Failed to get back stored message from imap server')
         # save us having to download it again - drop out of transaction so we don't wait on the parse
-        message = email.parse(rfc822, msgdata['msgid'])
+        message = parse.parse(rfc822, msgdata['msgid'])
         self.begin()
         self.dinsert('jrawmessage', {
             'msgid': msgdata['msgid'],
@@ -694,13 +694,12 @@ class ImapDB(DB):
         self.cursor.execute('SELECT msgid, parsed FROM jrawmessage'
             ' WHERE msgid IN (' + ('?,' * len(ids))[:-1] + ')', ids)
         
-        ids = set(ids)
         result = {msgid: json.loads(parsed) for msgid, parsed in self.cursor}
-        need = ids.difference(result.keys())
+        need = [i for i in ids if i not in result]
         udata = defaultdict(dict)
         if need:
             self.cursor.execute('SELECT ifolderid, uid, msgid FROM imessages WHERE msgid IN (' + ('?,' * len(need))[:-1] + ')',
-                list(need))
+                need)
             for ifolderid, uid, msgid in self.cursor:
                 udata[ifolderid][uid] = msgid
         
@@ -725,7 +724,7 @@ class ImapDB(DB):
             res = self.imap.fetch(uids, ['RFC822'])
             for uid, data in res.items():
                 msgid = uhash[uid]
-                result[msgid] = email.parse(data[b'RFC822'])
+                result[msgid] = parse.parse(data[b'RFC822'])
                 self.cursor.execute("INSERT OR REPLACE INTO jrawmessage (msgid,parsed,hasAttachment) VALUES (?,?,?)", [
                     msgid,
                     json.dumps(result[msgid]),

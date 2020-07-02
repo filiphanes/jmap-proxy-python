@@ -1,10 +1,13 @@
 import pytest
+from jmap.api import handle_request
 
-
-def test_Mailbox_get_all(api, accountId):
-    res = api.handle_request({"methodCalls": [
-        ["Mailbox/get", {"accountId": accountId, "ids": None}, "0"]
-    ]})
+def test_Mailbox_get_all(db, accountId):
+    res = handle_request({
+        "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
+        "methodCalls": [
+            ["Mailbox/get", {"accountId": accountId, "ids": None}, "0"]
+        ]
+    }, db)
     assert len(res['methodResponses']) == 1
     for method, response, tag in res['methodResponses']:
         assert method == "Mailbox/get"
@@ -28,19 +31,22 @@ def test_Mailbox_get_all(api, accountId):
             assert 'parentId' in mailbox
 
 
-def test_Email_query_inMailbox(api, accountId):
-    res = api.handle_request({"methodCalls": [
-        ["Email/query", {
-            "accountId": accountId,
-            "filter": {
-                "inMailbox": "75f21771-351f-43f6-bde0-4286ce638779"   # inbox
-            },
-            "position": 0,
-            "collapseThreads": True,
-            "limit": 10,
-            "calculateTotal": True
-        }, "0"]
-    ]})
+def test_Email_query_inMailbox(db, accountId):
+    res = handle_request({
+        "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
+        "methodCalls": [
+            ["Email/query", {
+                "accountId": accountId,
+                "filter": {
+                    "inMailbox": "d9ff53eb-0f98-4e17-8205-f7f418d9bc5a" # inbox
+                },
+                "position": 0,
+                "collapseThreads": True,
+                "limit": 10,
+                "calculateTotal": True
+            }, "0"]
+        ]
+    }, db)
     assert len(res['methodResponses']) == 1
     for method, response, tag in res['methodResponses']:
         assert method == "Email/query"
@@ -57,35 +63,38 @@ def test_Email_query_inMailbox(api, accountId):
         assert 'canCalculateChanges' in response
 
 
-def test_Email_get(api, accountId):
+def test_Email_get(db, accountId):
     properties = {
-        'threadId', 'mailboxIds', 'inReplyToEmailId', 'keywords', 'subject',
+        'threadId', 'mailboxIds', 'inReplyTo', 'keywords', 'subject',
         'sentAt', 'receivedAt', 'size', 'blobId',
         'from', 'to', 'cc', 'bcc', 'replyTo',
         'attachments', 'hasAttachment',
         'headers', 'preview', 'body', 'textBody', 'htmlBody',
     }
-    res = api.handle_request({"methodCalls": [
-        ["Email/get", {
-            "accountId": "u1",
-            "ids": ["mdfe661a66", "me400ec47d"],
-            "properties": list(properties),
-        }, "1"]
-    ]})
+    res = handle_request({
+        "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
+        "methodCalls": [
+            ["Email/get", {
+                "accountId": "u1",
+                "ids": ["mdfe661a66", "notexisting"],
+                "properties": list(properties),
+            }, "1"]
+        ]
+    }, db)
     assert len(res['methodResponses']) == 1
     for method, response, tag in res['methodResponses']:
         assert method == "Email/get"
         assert tag == "1"
         assert response['accountId'] == "u1"
         assert isinstance(response['notFound'], list)
-        assert len(response['notFound']) == 0
+        assert len(response['notFound']) == 1
         assert isinstance(response['list'], list)
-        assert len(response['list']) == 2
+        assert len(response['list']) == 1
         for msg in response['list']:
             for prop in properties - {'body'}:
                 assert prop in msg
 
-def test_Email_get_detail(api, accountId):
+def test_Email_get_detail(db, accountId):
     properties = {
         "blobId", "messageId", "inReplyTo", "references",
         "header:list-id:asText", "header:list-post:asURLs",
@@ -96,15 +105,18 @@ def test_Email_get_detail(api, accountId):
         "partId", "blobId", "size", "name", "type",
         "charset", "disposition", "cid", "location",
     ]
-    res = api.handle_request({"methodCalls": [
-        ["Email/get", {
-            "accountId": "u1",
-            "ids": ["m9dda32a70"],
-            "properties": list(properties),
-            "fetchHTMLBodyValues": True,
-            "bodyProperties": bodyProperties,
-        }, "0"]
-    ]})
+    res = handle_request({
+        "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
+        "methodCalls": [
+            ["Email/get", {
+                "accountId": "u1",
+                "ids": ["m9dda32a70"],
+                "properties": list(properties),
+                "fetchHTMLBodyValues": True,
+                "bodyProperties": bodyProperties,
+            }, "0"]
+        ],
+    }, db)
     assert len(res['methodResponses']) == 1
     for method, response, tag in res['methodResponses']:
         assert method == "Email/get"
@@ -119,17 +131,20 @@ def test_Email_get_detail(api, accountId):
                 assert prop in msg
 
 
-def test_Email_set(api, accountId):
-    res = api.handle_request({"methodCalls": [
-        ["Email/set", {
-            "accountId": accountId,
-            "update": {
-                "mdfe661a66": {
-                    "keywords/$seen": None
+def test_Email_set(db, accountId):
+    res = handle_request({
+        "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
+        "methodCalls": [
+            ["Email/set", {
+                "accountId": accountId,
+                "update": {
+                    "mdfe661a66": {
+                        "keywords/$seen": None
+                    }
                 }
-            }
-        }, "0"]
-    ]})
+            }, "0"]
+        ]
+    }, db)
     assert len(res['methodResponses']) == 1
     for method, response, tag in res['methodResponses']:
         assert method == "Email/set"
@@ -149,17 +164,19 @@ def test_Email_set(api, accountId):
         assert len(response['notDestroyed']) == 0
 
 
-def test_Email_query_first_page(api, accountId):
+def test_Email_query_first_page(db, accountId):
     properties = [
         "threadId", "mailboxIds", "subject", "receivedAt",
         "keywords", "hasAttachment", "from", "to", "preview",
     ]
-    res = api.handle_request({"methodCalls": [
+    res = handle_request({
+        "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
+        "methodCalls": [
         # First we do a query for the id of first 10 messages in the mailbox
         ["Email/query", {
             "accountId": accountId,
             "filter": {
-                "inMailbox": "75f21771-351f-43f6-bde0-4286ce638779"   # inbox
+                "inMailbox": "d9ff53eb-0f98-4e17-8205-f7f418d9bc5a"   # inbox
             },
             "sort": [
                 {"property": "receivedAt", "isAscending": False}
@@ -201,7 +218,7 @@ def test_Email_query_first_page(api, accountId):
             },
             "properties": properties
         }, "3"]
-    ]})
+    ]}, db)
     assert len(res['methodResponses']) == 4
     for method, response, tag in res['methodResponses']:
         if tag == '0':
@@ -218,16 +235,18 @@ def test_Email_query_first_page(api, accountId):
                     assert prop in msg
 
 
-def test_Email_query_second_page(api, accountId):
+def test_Email_query_second_page(db, accountId):
     properties = [
         "threadId", "mailboxIds", "subject", "receivedAt",
         "keywords", "hasAttachment", "from", "to", "preview",
     ]
-    res = api.handle_request({"methodCalls": [
+    res = handle_request({
+        "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
+        "methodCalls": [
         [ "Email/query", {
             "accountId": accountId,
             "filter": {
-                "inMailbox": "75f21771-351f-43f6-bde0-4286ce638779"   # inbox
+                "inMailbox": "d9ff53eb-0f98-4e17-8205-f7f418d9bc5a"   # inbox
             },
             "sort": [
                 { "property": "receivedAt", "isAscending": False }
@@ -245,7 +264,7 @@ def test_Email_query_second_page(api, accountId):
             },
             "properties": properties
         }, "1" ]
-    ]})
+    ]}, db)
     assert len(res['methodResponses']) == 2
     for method, response, tag in res['methodResponses']:
         if tag == '0':
@@ -257,32 +276,38 @@ def test_Email_query_second_page(api, accountId):
                     assert prop in msg
 
 
-def test_Email_changes(api, accountId):
-    res = api.handle_request({"methodCalls": [
+def test_Email_changes(db, accountId):
+    res = handle_request({
+        "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
+        "methodCalls": [
         # Fetch a list of created/updated/deleted Emails
         [ "Email/changes", {
             "accountId": accountId,
             "sinceState": "1",
             "maxChanges": 30
         }, "0"],
-    ]})
+    ]}, db)
     assert len(res['methodResponses']) == 2
 
 
-def test_Thread_changes(api, accountId):
-    res = api.handle_request({"methodCalls": [
+def test_Thread_changes(db, accountId):
+    res = handle_request({
+        "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
+        "methodCalls": [
         # Fetch a list of created/udpated/deleted Threads
         [ "Thread/changes", {
             "accountId": accountId,
             "sinceState": "1",
             "maxChanges": 30
         }, "0"],
-    ]})
+    ]}, db)
     assert len(res['methodResponses']) == 2
 
 
-def test_Mailbox_changes(api, accountId):
-    res = api.handle_request({"methodCalls": [
+def test_Mailbox_changes(db, accountId):
+    res = handle_request({
+        "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
+        "methodCalls": [
         # Fetch a list of mailbox ids that have changed
         [ "Mailbox/changes", {
             "accountId": accountId,
@@ -311,7 +336,7 @@ def test_Mailbox_changes(api, accountId):
                 "resultOf": "0"
             }
         }, "2" ]
-    ]})
+    ]}, db)
     assert len(res['methodResponses']) == 1
     for method, response, tag in res['methodResponses']:
         if tag == '0':

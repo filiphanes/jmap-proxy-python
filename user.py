@@ -5,15 +5,13 @@ from starlette.authentication import (
     UnauthenticatedUser, AuthCredentials
 )
 
-from jmap.imapdb import ImapDB
-from jmap.api import JmapApi
+from jmap.db import ImapDB
 
 
 class User(BaseUser):
     def __init__(self, username: str, password: str) -> None:
         self.username = username
         self.db = ImapDB(username, password)
-        self.jmap = JmapApi(self.db)
 
     @property
     def is_authenticated(self) -> bool:

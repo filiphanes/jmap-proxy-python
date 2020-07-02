@@ -10,7 +10,7 @@ try:
 except ImportError:
     import json
 
-from jmap import email
+from jmap.mail import parse
 
 TABLE2GROUPS = {
   'jmessages': ['Email'],
@@ -29,7 +29,7 @@ TABLE2GROUPS = {
   'jcalendarprefs': ['CalendarPreferences'],
 }
 
-class DB:
+class BaseDB:
     def __init__(self, accountid, path='./data/'):
         self.accountid = accountid
         self.dbpath = os.path.join(path, accountid + '.db')
@@ -131,23 +131,20 @@ class DB:
     def dirty(self, table):
         if not self.modseq:
             user = self.get_user()
-            user['jhighestmodseq'] = user['jhighestmodseq'] + 1
-            self.modseq = user['jhighestmodseq']
+            self.modseq = user['jhighestmodseq'] = user['jhighestmodseq'] + 1
         self.tables[table] = self.modseq
         return self.modseq
 
     def get_user(self):
-        if not hasattr(self, 'user'):
-            self.cursor.execute("SELECT * FROM account LIMIT 1")
-            row = self.cursor.fetchone()
-            if row:
-                self.user = dict(row)
-            else:
-                self.cursor.execute("INSERT INTO account "
-                    " (email,displayname, jhighestmodseq) VALUES (?,?,?)",
-                    [self.accountid, self.accountid, 1])
-                return self.get_user()
-        return self.user
+        self.cursor.execute("SELECT * FROM account LIMIT 1")
+        row = self.cursor.fetchone()
+        if row:
+            return dict(row)
+        else:
+            self.cursor.execute("INSERT INTO account "
+                " (email,displayname, jhighestmodseq) VALUES (?,?,?)",
+                [self.accountid, self.accountid, 1])
+            return self.get_user()
 
     def touch_thread_by_msgid(self, msgid):
         self.cursor.execute("SELECT thrid FROM jmessages WHERE msgid=?", [msgid])
@@ -200,20 +197,6 @@ class DB:
             for mailbox in mailboxes:
                 self.add_message_to_mailbox(data['msgid'], mailbox)
             self.touch_thread_by_msgid(data['msgid'])
-
-    def update_prefs(self, type, data):
-        if type == 'UserPreferences':
-            table = 'juserprefs'
-        elif type == 'ClientPreferences':
-            table = 'jclientprefs',
-        elif type == 'CalendarPreferences':
-            table = 'jcalendarprefs'
-        
-        modseq = self.dirty(table)
-        self.cursor.execute(f"""INSERT INTO {table}
-            (jprefid, payload, jcreated, jmodseq, active) VALUES
-            (?,?,?,?,?)""",
-            [data['id'], json.dumps(data)], modseq, modseq, 1)
 
     def update_mailbox_counts(self, jmailboxid, jmodseq):
         self.updated_mailbox_counts[jmailboxid] = jmodseq
@@ -288,7 +271,7 @@ class DB:
             keywords = item.pop('keywords', ())
             item['date'] = datetime.now().isoformat()
             item['headers']['Message-ID'] += '<' + str(uuid.uuid4()) + '.' + item['date'] + os.getenv('jmaphost')
-            message = email.make(item, self.get_blob())
+            message = parse.make(item, self.get_blob())
             todo[cid] = (message, mailboxIds, keywords)
         
         created = {}
@@ -726,4 +709,4 @@ class DB:
             jmodseq INTEGER,
             mtime DATE,
             active BOOLEAN
-        );""")
+        );""" )
