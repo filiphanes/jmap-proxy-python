@@ -5,13 +5,20 @@ from starlette.authentication import (
     UnauthenticatedUser, AuthCredentials
 )
 
-from jmap.db import ImapDB
+from jmap.account import ImapAccount
 
 
 class User(BaseUser):
+    """
+    User is person with credentials.
+    User can have access to multiple (shared) accounts.
+    User has one personal account.
+    """
     def __init__(self, username: str, password: str) -> None:
         self.username = username
-        self.db = ImapDB(username, password)
+        self.accounts = {
+            username: ImapAccount(username, password),
+        }
 
     @property
     def is_authenticated(self) -> bool:

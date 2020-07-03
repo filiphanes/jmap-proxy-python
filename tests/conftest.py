@@ -1,5 +1,6 @@
 import pytest
 
+
 @pytest.fixture
 def accountId():
     return 'u1'
@@ -12,7 +13,12 @@ def db(accountId):
 
 
 @pytest.fixture
-def api(db):
-    from jmap.api import Api, USING_MIXINS
-    bases = tuple(USING_MIXINS.values())
-    return type('API', bases, Api.__dict__)(db)
+def user(accountId):
+    from user import User
+    return User(accountId, 'h')
+
+
+@pytest.fixture
+def api(user):
+    from jmap.api import Api
+    return Api(user)

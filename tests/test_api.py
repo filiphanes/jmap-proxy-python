@@ -1,18 +1,20 @@
 import pytest
 from jmap.api import handle_request
 
-def test_Mailbox_get_all(db, accountId):
-    res = handle_request({
+INBOX_ID = "9250d845-dbb6-4207-a6e4-986381c6a203"
+
+def test_Mailbox_get_all(db, user):
+    res = handle_request(user, {
         "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
         "methodCalls": [
-            ["Mailbox/get", {"accountId": accountId, "ids": None}, "0"]
+            ["Mailbox/get", {"accountId": user.username, "ids": None}, "0"]
         ]
-    }, db)
+    })
     assert len(res['methodResponses']) == 1
     for method, response, tag in res['methodResponses']:
         assert method == "Mailbox/get"
         assert tag == "0"
-        assert response['accountId'] == accountId
+        assert response['accountId'] == user.username
         assert int(response['state']) > 0
         assert isinstance(response['notFound'], list)
         assert len(response['notFound']) == 0
@@ -31,14 +33,14 @@ def test_Mailbox_get_all(db, accountId):
             assert 'parentId' in mailbox
 
 
-def test_Email_query_inMailbox(db, accountId):
-    res = handle_request({
+def test_Email_query_inMailbox(db, user):
+    res = handle_request(user, {
         "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
         "methodCalls": [
             ["Email/query", {
-                "accountId": accountId,
+                "accountId": user.username,
                 "filter": {
-                    "inMailbox": "d9ff53eb-0f98-4e17-8205-f7f418d9bc5a" # inbox
+                    "inMailbox": INBOX_ID # inbox
                 },
                 "position": 0,
                 "collapseThreads": True,
@@ -46,12 +48,12 @@ def test_Email_query_inMailbox(db, accountId):
                 "calculateTotal": True
             }, "0"]
         ]
-    }, db)
+    })
     assert len(res['methodResponses']) == 1
     for method, response, tag in res['methodResponses']:
         assert method == "Email/query"
         assert tag == "0"
-        assert response['accountId'] == accountId
+        assert response['accountId'] == user.username
         assert response['position'] == 0
         assert response['total']
         assert response['collapseThreads'] == True
@@ -63,7 +65,7 @@ def test_Email_query_inMailbox(db, accountId):
         assert 'canCalculateChanges' in response
 
 
-def test_Email_get(db, accountId):
+def test_Email_get(db, user):
     properties = {
         'threadId', 'mailboxIds', 'inReplyTo', 'keywords', 'subject',
         'sentAt', 'receivedAt', 'size', 'blobId',
@@ -71,21 +73,21 @@ def test_Email_get(db, accountId):
         'attachments', 'hasAttachment',
         'headers', 'preview', 'body', 'textBody', 'htmlBody',
     }
-    res = handle_request({
+    res = handle_request(user, {
         "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
         "methodCalls": [
             ["Email/get", {
-                "accountId": "u1",
+                "accountId": user.username,
                 "ids": ["mdfe661a66", "notexisting"],
                 "properties": list(properties),
             }, "1"]
         ]
-    }, db)
+    })
     assert len(res['methodResponses']) == 1
     for method, response, tag in res['methodResponses']:
         assert method == "Email/get"
         assert tag == "1"
-        assert response['accountId'] == "u1"
+        assert response['accountId'] == user.username
         assert isinstance(response['notFound'], list)
         assert len(response['notFound']) == 1
         assert isinstance(response['list'], list)
@@ -94,7 +96,8 @@ def test_Email_get(db, accountId):
             for prop in properties - {'body'}:
                 assert prop in msg
 
-def test_Email_get_detail(db, accountId):
+
+def test_Email_get_detail(db, user):
     properties = {
         "blobId", "messageId", "inReplyTo", "references",
         "header:list-id:asText", "header:list-post:asURLs",
@@ -105,23 +108,23 @@ def test_Email_get_detail(db, accountId):
         "partId", "blobId", "size", "name", "type",
         "charset", "disposition", "cid", "location",
     ]
-    res = handle_request({
+    res = handle_request(user, {
         "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
         "methodCalls": [
             ["Email/get", {
-                "accountId": "u1",
+                "accountId": user.username,
                 "ids": ["m9dda32a70"],
                 "properties": list(properties),
                 "fetchHTMLBodyValues": True,
                 "bodyProperties": bodyProperties,
             }, "0"]
         ],
-    }, db)
+    })
     assert len(res['methodResponses']) == 1
     for method, response, tag in res['methodResponses']:
         assert method == "Email/get"
         assert tag == "0"
-        assert response['accountId'] == "u1"
+        assert response['accountId'] == user.username
         assert isinstance(response['notFound'], list)
         assert len(response['notFound']) == 0
         assert isinstance(response['list'], list)
@@ -131,12 +134,12 @@ def test_Email_get_detail(db, accountId):
                 assert prop in msg
 
 
-def test_Email_set(db, accountId):
-    res = handle_request({
+def test_Email_set(db, user):
+    res = handle_request(user, {
         "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
         "methodCalls": [
             ["Email/set", {
-                "accountId": accountId,
+                "accountId": user.username,
                 "update": {
                     "mdfe661a66": {
                         "keywords/$seen": None
@@ -144,12 +147,12 @@ def test_Email_set(db, accountId):
                 }
             }, "0"]
         ]
-    }, db)
+    })
     assert len(res['methodResponses']) == 1
     for method, response, tag in res['methodResponses']:
         assert method == "Email/set"
         assert tag == "0"
-        assert response['accountId'] == accountId
+        assert response['accountId'] == user.username
         assert isinstance(response['updated'], dict)
         assert isinstance(response['notUpdated'], dict)
         assert isinstance(response['created'], dict)
@@ -164,19 +167,19 @@ def test_Email_set(db, accountId):
         assert len(response['notDestroyed']) == 0
 
 
-def test_Email_query_first_page(db, accountId):
+def test_Email_query_first_page(db, user):
     properties = [
         "threadId", "mailboxIds", "subject", "receivedAt",
         "keywords", "hasAttachment", "from", "to", "preview",
     ]
-    res = handle_request({
+    res = handle_request(user, {
         "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
         "methodCalls": [
         # First we do a query for the id of first 10 messages in the mailbox
         ["Email/query", {
-            "accountId": accountId,
+            "accountId": user.username,
             "filter": {
-                "inMailbox": "d9ff53eb-0f98-4e17-8205-f7f418d9bc5a"   # inbox
+                "inMailbox": INBOX_ID
             },
             "sort": [
                 {"property": "receivedAt", "isAscending": False}
@@ -189,7 +192,7 @@ def test_Email_query_first_page(db, accountId):
 
         # Then we fetch the threadId of each of those messages
         ["Email/get", {
-            "accountId": accountId,
+            "accountId": user.username,
             "#ids": {
                 "name": "Email/query",
                 "path": "/ids",
@@ -200,7 +203,7 @@ def test_Email_query_first_page(db, accountId):
 
         # Next we get the emailIds of the messages in those threads
         ["Thread/get", {
-            "accountId": accountId,
+            "accountId": user.username,
             "#ids": {
                 "name": "Email/get",
                 "path": "/list/*/threadId",
@@ -210,7 +213,7 @@ def test_Email_query_first_page(db, accountId):
 
         # Finally we get the data for all those emails
         ["Email/get", {
-            "accountId": accountId,
+            "accountId": user.username,
             "#ids": {
                 "name": "Thread/get",
                 "path": "/list/*/emailIds",
@@ -218,7 +221,7 @@ def test_Email_query_first_page(db, accountId):
             },
             "properties": properties
         }, "3"]
-    ]}, db)
+    ]})
     assert len(res['methodResponses']) == 4
     for method, response, tag in res['methodResponses']:
         if tag == '0':
@@ -235,18 +238,18 @@ def test_Email_query_first_page(db, accountId):
                     assert prop in msg
 
 
-def test_Email_query_second_page(db, accountId):
+def test_Email_query_second_page(db, user):
     properties = [
         "threadId", "mailboxIds", "subject", "receivedAt",
         "keywords", "hasAttachment", "from", "to", "preview",
     ]
-    res = handle_request({
+    res = handle_request(user, {
         "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
         "methodCalls": [
         [ "Email/query", {
-            "accountId": accountId,
+            "accountId": user.username,
             "filter": {
-                "inMailbox": "d9ff53eb-0f98-4e17-8205-f7f418d9bc5a"   # inbox
+                "inMailbox": INBOX_ID
             },
             "sort": [
                 { "property": "receivedAt", "isAscending": False }
@@ -256,7 +259,7 @@ def test_Email_query_second_page(db, accountId):
             "limit": 10
         }, "0" ],
         [ "Email/get", {
-            "accountId": accountId,
+            "accountId": user.username,
             "#ids": {
                 "name": "Email/query",
                 "path": "/ids",
@@ -264,7 +267,7 @@ def test_Email_query_second_page(db, accountId):
             },
             "properties": properties
         }, "1" ]
-    ]}, db)
+    ]})
     assert len(res['methodResponses']) == 2
     for method, response, tag in res['methodResponses']:
         if tag == '0':
@@ -276,46 +279,46 @@ def test_Email_query_second_page(db, accountId):
                     assert prop in msg
 
 
-def test_Email_changes(db, accountId):
-    res = handle_request({
+def test_Email_changes(db, user):
+    res = handle_request(user, {
         "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
         "methodCalls": [
         # Fetch a list of created/updated/deleted Emails
         [ "Email/changes", {
-            "accountId": accountId,
+            "accountId": user.username,
             "sinceState": "1",
             "maxChanges": 30
         }, "0"],
-    ]}, db)
+    ]})
     assert len(res['methodResponses']) == 2
 
 
-def test_Thread_changes(db, accountId):
-    res = handle_request({
+def test_Thread_changes(db, user):
+    res = handle_request(user, {
         "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
         "methodCalls": [
         # Fetch a list of created/udpated/deleted Threads
         [ "Thread/changes", {
-            "accountId": accountId,
+            "accountId": user.username,
             "sinceState": "1",
             "maxChanges": 30
         }, "0"],
-    ]}, db)
+    ]})
     assert len(res['methodResponses']) == 2
 
 
-def test_Mailbox_changes(db, accountId):
-    res = handle_request({
+def test_Mailbox_changes(db, user):
+    res = handle_request(user, {
         "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
         "methodCalls": [
         # Fetch a list of mailbox ids that have changed
         [ "Mailbox/changes", {
-            "accountId": accountId,
+            "accountId": user.username,
             "sinceState": "1"
         }, "0"],
         # Fetch any mailboxes that have been created
         [ "Mailbox/get", {
-            "accountId": accountId,
+            "accountId": user.username,
             "#ids": {
                 "name": "Mailbox/changes",
                 "path": "/created",
@@ -324,7 +327,7 @@ def test_Mailbox_changes(db, accountId):
         }, "1" ],
         # Fetch any mailboxes that have been updated
         [ "Mailbox/get", {
-            "accountId": accountId,
+            "accountId": user.username,
             "#ids": {
                 "name": "Mailbox/changes",
                 "path": "/updated",
@@ -336,7 +339,7 @@ def test_Mailbox_changes(db, accountId):
                 "resultOf": "0"
             }
         }, "2" ]
-    ]}, db)
+    ]})
     assert len(res['methodResponses']) == 1
     for method, response, tag in res['methodResponses']:
         if tag == '0':

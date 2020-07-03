@@ -10,7 +10,7 @@ try:
 except ImportError:
     import json
 
-from jmap.mail import parse
+from jmap import parse
 
 TABLE2GROUPS = {
   'jmessages': ['Email'],

@@ -2,32 +2,35 @@ import logging as log
 from time import monotonic
 import re
 
-import jmap
+import jmap.core as core
+import jmap.mail as mail
+import jmap.submission as submission
+import jmap.vacationresponse as vacationresponse
+import jmap.contacts as contacts
+import jmap.calendars as calendars
 
 
-USING_MIXINS = {
-    'urn:ietf:params:jmap:calendars': jmap.Calendars,
-    'urn:ietf:params:jmap:contacts': jmap.Contacts,
-    'urn:ietf:params:jmap:vacationresponse': jmap.VacationResponse,
-    'urn:ietf:params:jmap:submission': jmap.Submission,
-    'urn:ietf:params:jmap:mail': jmap.Mail,
-    'urn:ietf:params:jmap:core': jmap.Core,
+CAPABILITIES = {
+    'urn:ietf:params:jmap:core': core,
+    'urn:ietf:params:jmap:mail': mail,
+    # 'urn:ietf:params:jmap:submission': jmap.submission,
+    # 'urn:ietf:params:jmap:vacationresponse': jmap.vacationresponse,
+    # 'urn:ietf:params:jmap:contacts': jmap.contacts,
+    # 'urn:ietf:params:jmap:calendars': jmap.calendars,
 }
 
-def handle_request(data, db):
+def handle_request(user, data):
     results = []
     resultsByTag = {}
 
-    # dynamic class creation
-    bases = tuple(b for u, b in USING_MIXINS.items() if u in data['using'])
-    idmap = data.get('createdIds', None)
-    api = type('API', bases, dict(Api.__dict__))(db, idmap)
-    # api = Api(db)
+    api = Api(user, data.get('createdIds', None))
+    for capability in data['using']:
+        CAPABILITIES[capability].register_methods(api)
 
     for cmd, kwargs, tag in data['methodCalls']:
         t0 = monotonic()
         logbit = ''
-        func = getattr(api, "api_" + cmd.replace('/', '_'), None)
+        func = api.methods.get(cmd, None)
         if not func:
             results.append(('error', {'error': 'unknownMethod'}, tag))
             continue
@@ -50,7 +53,7 @@ def handle_request(data, db):
         if error: continue
 
         try:
-            result = func(**kwargs)
+            result = func(api, **kwargs)
             results.append((cmd, result, tag))
             resultsByTag[tag] = result
         except Exception as e:
@@ -86,45 +89,21 @@ def handle_request(data, db):
 
 
 class Api:
-    def __init__(self, db, idmap=None):
-        self.db = db
+    def __init__(self, user, idmap=None):
+        self.user = user
+        for account in user.accounts.values():
+            self.db = account.db
         self._idmap = idmap or {}
+        self.methods = {}
+    
+    def getdb(self, accountId):
+        return self.user.accounts[accountId].db
 
-    def _patchitem(self, item, path: str, val=None):
-        try:
-            prop, path = path.split('/', maxsplit=1)
-            return self._patchitem(item[prop], path, val)
-        except ValueError:
-            if val is not None:
-                item[path] = val
-            elif path in item:
-                del item[path]
+    def setid(self, key, val):
+        self._idmap[f'#{key}'] = val
 
-    def _resolve_patch(self, accountId, update, get_data):
-        for id, item in update.items():
-            properties = {}
-            for path in item.keys():
-                try:
-                    prop, _ = path.split('/', maxsplit=1)
-                except ValueError:
-                    continue
-                if prop in properties:
-                    properties[prop].append(path)
-                else:
-                    properties[prop] = [path]
-            if not properties:
-                continue  # nothing patched in this one
-
-            data = get_data(accountId, ids=[id], properties=properties.keys())
-            try:
-                data = data['list'][0]
-            except (KeyError, IndexError):
-                # XXX - if nothing in the list we SHOULD abort
-                continue
-            for prop, paths in properties.items():
-                item[prop] = data[prop]
-                for path in paths:
-                    self._patchitem(item, path, item.pop(path))
+    def idmap(self, key):
+        return self._idmap.get(key, key)
 
     def getRawBlob(self, selector):
         blobId, filename = selector.split('/', maxsplit=1)
@@ -136,12 +115,6 @@ class Api:
 
     def downloadFile(self, jfileid):
         return self.db.get_file(jfileid)
-
-    def setid(self, key, val):
-        self._idmap[f'#{key}'] = val
-
-    def idmap(self, key):
-        return self._idmap.get(key, key)
 
     def begin(self):
         self.db.begin()
@@ -157,7 +130,7 @@ def _parsepath(path, item):
     match = re.match(r'^/([^/]+)', path)
     if not match:
         return item
-    selector = match.group(1).replace('~1', '/').replace('~0', '~')
+    selector = match.group(1)
     if isinstance(item, list):
         if selector == '*':
             res = []

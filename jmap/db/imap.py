@@ -10,7 +10,7 @@ except ImportError:
 
 from imapclient import IMAPClient
 from imapclient.response_types import Envelope
-from jmap.mail import parse
+from jmap import parse
 
 from .base import BaseDB
 from email.header import decode_header, make_header
@@ -66,33 +66,8 @@ class ImapDB(BaseDB):
     def __init__(self, username, password='h', host='localhost', port=143, *args, **kwargs):
         super().__init__(username, *args, **kwargs)
         self.imap = IMAPClient(host, port, use_uid=True, ssl=False)
-        self.imap.login(username, password)
-
-    def setuser(self, args):
-        # TODO: picture, ...
-        self.begin()
-        data = self.dgetone('iserver')
-        if data:
-            self.dmaybeupdate('iserver', args)
-        else:
-            self.dinsert('iserver', args)
+        res = self.imap.login(username, password)
         
-        user = self.dgetone('account')
-        if user:
-            self.dmaybeupdate('account', {'email': args['username']})
-        else:
-            self.dinsert('account', {
-                'email': args['username'],
-                'jdeletedmodseq': 0,
-                'jhighestmodseq': 1,
-            })
-        self.commit()
-
-    def access_token(self):
-        return self.dgetone('iserver', {}, 'imapHost,username,password')
-
-    def access_data(self):
-        return self.dgetone('iserver')
     
     def sync_folders(self):
         "Synchronise list from IMAP to local folder cache"
@@ -998,62 +973,6 @@ class ImapDB(BaseDB):
             )""")
 
         self.dbh.execute("CREATE INDEX IF NOT EXISTS ithrid ON ithread (thrid)");
-
-        self.dbh.execute("""
-            CREATE TABLE IF NOT EXISTS icalendars (
-            icalendarid INTEGER PRIMARY KEY NOT NULL,
-            href TEXT,
-            name TEXT,
-            isReadOnly INTEGER,
-            sortOrder INTEGER,
-            color TEXT,
-            syncToken TEXT,
-            jcalendarid INTEGER,
-            mtime DATE NOT NULL
-            )""")
-
-        self.dbh.execute("""
-            CREATE TABLE IF NOT EXISTS ievents (
-            ieventid INTEGER PRIMARY KEY NOT NULL,
-            icalendarid INTEGER,
-            href TEXT,
-            etag TEXT,
-            uid TEXT,
-            content TEXT,
-            mtime DATE NOT NULL
-            )""")
-
-        self.dbh.execute("CREATE INDEX IF NOT EXISTS ieventcal ON ievents (icalendarid)");
-        self.dbh.execute("CREATE INDEX IF NOT EXISTS ieventuid ON ievents (uid)");
-
-        self.dbh.execute("""
-            CREATE TABLE IF NOT EXISTS iaddressbooks (
-            iaddressbookid INTEGER PRIMARY KEY NOT NULL,
-            href TEXT,
-            name TEXT,
-            isReadOnly INTEGER,
-            sortOrder INTEGER,
-            syncToken TEXT,
-            jaddressbookid INTEGER,
-            mtime DATE NOT NULL
-            )""")
-
-        # XXX - should we store 'kind' in this?  Means we know which j table to update
-        # if someone reuses a UID from a contact to a group or vice versa...
-        self.dbh.execute("""
-            CREATE TABLE IF NOT EXISTS icards (
-            icardid INTEGER PRIMARY KEY NOT NULL,
-            iaddressbookid INTEGER,
-            href TEXT,
-            etag TEXT,
-            uid TEXT,
-            kind TEXT,
-            content TEXT,
-            mtime DATE NOT NULL
-            )""")
-
-        self.dbh.execute("CREATE INDEX IF NOT EXISTS icardbook ON icards (iaddressbookid)");
-        self.dbh.execute("CREATE INDEX IF NOT EXISTS icarduid ON icards (uid)");
 
         self.dbh.execute("CREATE TABLE IF NOT EXISTS imsgidtodo (msgid TEXT PRIMARY KEY NOT NULL)");
 

@@ -16,7 +16,7 @@ from starlette.responses import Response, StreamingResponse
 from starlette.routing import Route, Mount
 from starlette.staticfiles import StaticFiles
 
-from jmap.api import handle_request, USING_MIXINS
+from jmap.api import handle_request, CAPABILITIES
 from user import BasicAuthBackend
 
 
@@ -28,8 +28,15 @@ class JSONResponse(Response):
 
 
 async def api(request):
-    data = json.loads(await request.body())
-    res = handle_request(data, db=request.user.db)
+    try:
+        data = json.loads(await request.body())
+    except Exception:
+        return JSONResponse({
+            "type": "urn:ietf:params:jmap:error:notJson",
+            "status": 400,
+            "detail": "The content of the request did not parse as JSON."
+        }, 400)
+    res = handle_request(request.user, data)
     return JSONResponse(res)
 
 
@@ -69,37 +76,16 @@ async def event(request):
 BASEURL = os.getenv('BASEURL', 'http://127.0.0.1:8888')
 async def well_known_jmap(request):
     res = {
-        "capabilities": {u: c.capabilityValue for u, c in USING_MIXINS.items()},
+        "capabilities": {u: c.capabilityValue for u, c in CAPABILITIES.items()},
         "username": request.user.username,
         "accounts": {
-            request.user.username: {
-                "name": request.user.display_name,
-                "isPersonal": True,
+            account.id: {
+                "name": account.name,
+                "isPersonal": account.is_personal,
                 "isArchiveUser": False,
-                "accountCapabilities": {
-                    "urn:ietf:params:jmap:vacationresponse": {},
-                    "urn:ietf:params:jmap:submission": {
-                        "submissionExtensions": [],
-                        "maxDelayedSend": 44236800
-                    },
-                    "urn:ietf:params:jmap:mail": {
-                        "maxSizeMailboxName": 490,
-                        "maxSizeAttachmentsPerEmail": 50000000,
-                        "mayCreateTopLevelMailbox": True,
-                        "maxMailboxesPerEmail": 1000,
-                        "maxMailboxDepth": None,
-                        "emailQuerySortOptions": [
-                            "receivedAt",
-                            "from",
-                            "to",
-                            "subject",
-                            "size",
-                            "header.x-spam-score"
-                        ]
-                    }
-                },
+                "accountCapabilities": account.capabilities,
                 "isReadOnly": False
-            }
+            } for account in request.user.accounts.values()
         },
         "primaryAccounts": {
             "urn:ietf:params:jmap:submission": request.user.username,
