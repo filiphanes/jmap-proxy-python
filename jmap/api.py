@@ -8,6 +8,7 @@ import jmap.submission as submission
 import jmap.vacationresponse as vacationresponse
 import jmap.contacts as contacts
 import jmap.calendars as calendars
+from jmap import errors
 
 
 CAPABILITIES = {
@@ -91,39 +92,20 @@ def handle_request(user, data):
 class Api:
     def __init__(self, user, idmap=None):
         self.user = user
-        for account in user.accounts.values():
-            self.db = account.db
         self._idmap = idmap or {}
         self.methods = {}
     
-    def getdb(self, accountId):
-        return self.user.accounts[accountId].db
-
+    def get_account(self, accountId):
+        try:
+            return self.user.accounts[accountId]
+        except KeyError:
+            raise errors.accountNotFound()
+    
     def setid(self, key, val):
         self._idmap[f'#{key}'] = val
 
     def idmap(self, key):
         return self._idmap.get(key, key)
-
-    def getRawBlob(self, selector):
-        blobId, filename = selector.split('/', maxsplit=1)
-        typ, data = self.db.get_blob(blobId)
-        return typ, data, filename
-
-    def uploadFile(self, accountid, typ, content):
-        return self.db.put_file(accountid, typ, content)
-
-    def downloadFile(self, jfileid):
-        return self.db.get_file(jfileid)
-
-    def begin(self):
-        self.db.begin()
-
-    def commit(self):
-        self.db.commit()
-
-    def rollback(self):
-        self.db.rollback()
 
 
 def _parsepath(path, item):

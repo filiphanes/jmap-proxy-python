@@ -10,6 +10,9 @@ def register_methods(api):
     })
 
 
-def api_Calendar_refreshSynced(request, **kwargs):
-    request.db.sync_calendars()
-    return {}
+def api_Calendar_refreshSynced(request, accountId, **kwargs):
+    account = request.get_account(accountId)
+    account.sync_calendars()
+    return {
+        'accountId': accountId,
+    }

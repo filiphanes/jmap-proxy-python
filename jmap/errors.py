@@ -1,48 +1,113 @@
-class accountNotFound(Exception):
-    pass
+class JmapError(Exception):
+    "Base JMAP Exception"
 
-class anchorNotFound(Exception):
-    pass
-
-class cannotCalculateChanges(Exception):
-    pass
-
-class serverUnavailable(Exception):
-    "Some internal server resource was temporarily unavailable. Attempting the same operation later (perhaps after a backoff with a random factor) may succeed."
-    pass
-
-class serverFail(Exception):
-    "An unexpected or unknown error occurred during the processing of the call. A description property should provide more details about the error. The method call made no changes to the server’s state. Attempting the same operation again is expected to fail again. Contacting the service administrator is likely necessary to resolve this problem if it is persistent."
-    pass
-
-class serverPartialFail(Exception):
-    "Some, but not all, expected changes described by the method occurred. The client MUST resynchronise impacted data to determine server state. Use of this error is strongly discouraged."
-    pass
-
-class unknownMethod(Exception):
-    "The server does not recognise this method name."
-    pass
-
-class invalidArguments(Exception):
-    "One of the arguments is of the wrong type or is otherwise invalid, or a required argument is missing."
-    pass
-
-class invalidResultReference(Exception):
-    "The method used a result reference for one of its arguments (see Section 3.7), but this failed to resolve."
-    pass
-
-class forbidden(Exception):
-    "The method and arguments are valid, but executing the method would violate an Access Control List (ACL) or other permissions policy."
-    pass
-
-class accountNotFound(Exception):
+class accountNotFound(JmapError):
     "The accountId does not correspond to a valid account."
-    pass
 
-class accountNotSupportedByMethod(Exception):
+class fromAccountNotFound(JmapError):
+    "The fromAccountId does not correspond to a valid account."
+
+class fromAccountNotSupportedByMethod(JmapError):
+    "The fromAccountId given corresponds to a valid account, but the account does not support this data type."
+
+class anchorNotFound(JmapError):
+    "An anchor argument was supplied, but it cannot be found in the results of the query."
+
+class notJSON(JmapError):
+    "The content type of the request was not application/json or the request did not parse as I-JSON."
+
+class notRequest(JmapError):
+    "The request parsed as JSON but did not match the type signature of the Request object."
+
+class cannotCalculateChanges(JmapError):
+    "The server cannot calculate the changes from the state string given by the client."
+
+class serverUnavailable(JmapError):
+    "Some internal server resource was temporarily unavailable. Attempting the same operation later (perhaps after a backoff with a random factor) may succeed."
+
+class serverFail(JmapError):
+    "An unexpected or unknown error occurred during the processing of the call. A description property should provide more details about the error. The method call made no changes to the server’s state. Attempting the same operation again is expected to fail again. Contacting the service administrator is likely necessary to resolve this problem if it is persistent."
+
+class serverPartialFail(JmapError):
+    "Some, but not all, expected changes described by the method occurred. The client MUST resynchronise impacted data to determine server state. Use of this error is strongly discouraged."
+
+class invalidArguments(JmapError):
+    "One of the arguments is of the wrong type or is otherwise invalid, or a required argument is missing."
+
+class invalidResultReference(JmapError):
+    "The method used a result reference for one of its arguments (see Section 3.7), but this failed to resolve."
+
+class forbidden(JmapError):
+    "The method and arguments are valid, but executing the method would violate an Access Control List (ACL) or other permissions policy."
+
+class overQuota(JmapError):
+    "The create would exceed a server-defined limit on the number or total size of objects of this type."
+
+class tooLarge(JmapError):
+    "The create/update would result in an object that exceeds a server-defined limit for the maximum size of a single object of this type."
+
+class tooManyChanges(JmapError):
+    "There are more changes than the client’s maxChanges argument."
+
+class unknownCapability(JmapError):
+    "The client included a capability in the “using” property of the request that the server does not support."
+
+class unknownMethod(JmapError):
+    "The server does not recognise this method name."
+
+class unsupportedFilter(JmapError):
+    "The filter is syntactically valid, but the server cannot process it."
+
+class unsupportedSort(JmapError):
+    "The sort is syntactically valid, but includes a property the server does not support sorting on, or a collation method it does not recognise."
+
+
+class rateLimit(JmapError):
+    "Too many objects of this type have been created recently, and a server-defined rate limit has been reached. It may work if tried again later."
+
+class notFound(JmapError):
+    "The id given cannot be found."
+
+class invalidPatch(JmapError):
+    "The PatchObject given to update the record was not a valid patch (see the patch description)."
+
+class willDestroy(JmapError):
+    "The client requested that an object be both updated and destroyed in the same /set request, and the server has decided to therefore ignore the update."
+
+class invalidProperties(JmapError):
+    """
+    The record given is invalid in some way. For example:
+
+    It contains properties that are invalid according to the type specification of this record type.
+    It contains a property that may only be set by the server (e.g., “id”) and is different to the current value. Note, to allow clients to pass whole objects back, it is not an error to include a server-set property in an update as long as the value is identical to the current value on the server.
+    There is a reference to another record (foreign key), and the given id does not correspond to a valid record.
+
+    The SetError object SHOULD also have a property called properties of type String[] that lists all the properties that were invalid.
+
+    Individual methods MAY specify more specific errors for certain conditions that would otherwise result in an invalidProperties error. If the condition of one of these is met, it MUST be returned instead of the invalidProperties error.
+    """
+
+class singleton(JmapError):
+    "This is a singleton type, so you cannot create another one or destroy the existing one."
+
+class accountNotFound(JmapError):
+    "The accountId does not correspond to a valid account."
+
+class accountNotSupportedByMethod(JmapError):
     "The accountId given corresponds to a valid account, but the account does not support this method or data type."
-    pass
 
-class accountReadOnly(Exception):
+class accountReadOnly(JmapError):
     "This method modifies state, but the account is read-only (as returned on the corresponding Account object in the JMAP Session resource)."
-    pass
+
+class mailboxHasEmail(JmapError):
+    "Mailbox has at least one Email assigned to it, and the onDestroyRemoveEmails argument was false."
+
+class mailboxHasChild(JmapError):
+    "Mailbox still has at least one child Mailbox. The client MUST remove these before it can delete the parent Mailbox."
+
+class stateMismatch(JmapError):
+    "An ifInState argument was supplied, and it does not match the current state."
+
+class requestTooLarge(JmapError):
+    "The total number of objects to create, update, or destroy exceeds the maximum number the server is willing to process in a single method call."
+

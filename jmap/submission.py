@@ -15,11 +15,7 @@ def register_methods(api):
 
 
 def api_Identity_get(request, accountId, ids=None):
-    try:
-        account = request.user.accounts[accountId]
-    except KeyError:
-        raise errors.accountNotFound()
-    user = account.db.get_user()
+    account = request.get_account(accountId)
 
     # TODO:
     return {
@@ -27,13 +23,13 @@ def api_Identity_get(request, accountId, ids=None):
         'state': 'dummy',
         'list': {
             'id': "id1",
-            'displayName': account.displayname or user.email,
+            'displayName': account.displayname or request.user.email,
             'mayDelete': False,
-            'email': user.email,
-            'name': user.displayname or user.email,
+            'email': request.user.email,
+            'name': request.user.displayname or request.user.email,
             'textSignature': "-- \ntext signature",
             'htmlSignature': "-- <br><b>html signature</b>",
-            'replyTo': user.email,
+            'replyTo': request.user.email,
             'autoBcc': "",
             'addBccOnSMTP': False,
             'saveSentTo': None,

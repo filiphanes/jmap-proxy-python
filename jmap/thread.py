@@ -8,10 +8,8 @@ def register_methods(api):
 
 
 def api_Thread_get(request, accountId, ids: list):
-    if accountId and accountId != request.db.accountid:
-        raise errors.errors.accountNotFound()
-    user = request.db.get_user()
-    newState = user['jstateThread']
+    account = request.get_account(accountId)
+    newState = account.db.highModSeqThread
     lst = []
     seenids = set()
     notFound = []
@@ -20,11 +18,11 @@ def api_Thread_get(request, accountId, ids: list):
         if thrid in seenids:
             continue
         seenids.add(thrid)
-        msgids = request.db.dgetcol('jmessages', {'thrid': thrid, 'active': 1}, 'msgid')
-        if msgids:
+        rows = account.db.get_messages('msgid', thrid=thrid, deleted=0)
+        if rows:
             lst.append({
                 'id': thrid,
-                'emailIds': msgids,
+                'emailIds': [row['msgid'] for row in rows],
             })
         else:
             notFound.append(thrid)
@@ -38,25 +36,21 @@ def api_Thread_get(request, accountId, ids: list):
 
 
 def api_Thread_changes(request, accountId, sinceState, maxChanges=None, properties=()):
-    try:
-        account = request.user.accounts[accountId]
-    except KeyError:
-        raise errors.accountNotFound()
-    user = account.db.get_user()
-    newState = user['jstateThread']
-    if user['jdeletedmodseq'] and sinceState <= str(user['jdeletedmodseq']):
+    account = request.get_account(accountId)
+    newState = account.db.highModSeqThread
+    if sinceState <= str(account.db.lowModSeq):
         raise errors.cannotCalculateChanges({'new_state': newState})
     
-    rows = request.db.dget('jthreads', {'jmodseq': ('>', sinceState)},
-                        'thrid,active,jcreated')
+    rows = account.db.dget('jthreads', {'jmodseq': ('>', sinceState)},
+                        'thrid,deleted,jcreated')
     if maxChanges and len(rows) > maxChanges:
         raise errors.cannotCalculateChanges({'new_state': newState})
     
     created = []
     updated = []
     removed = []
-    for thrid, active, jcreated in rows:
-        if active:
+    for thrid, deleted, jcreated in rows:
+        if not deleted:
             if jcreated <= sinceState:
                 updated.append(thrid)
             else:

@@ -1,7 +1,8 @@
 import pytest
 from jmap.api import handle_request
+from random import random
 
-INBOX_ID = "9250d845-dbb6-4207-a6e4-986381c6a203"
+INBOX_ID = "f1588506601"
 
 def test_Mailbox_get_all(db, user):
     res = handle_request(user, {
@@ -33,6 +34,56 @@ def test_Mailbox_get_all(db, user):
             assert 'parentId' in mailbox
 
 
+def test_Mailbox_create_destroy(db, user):
+    # Create
+    res = handle_request(user, {
+        "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
+        "methodCalls": [
+            ["Mailbox/set", {
+                "accountId": user.username,
+                "create": {
+                    "test": {
+                        "parentId": INBOX_ID,
+                        "name": str(random()),
+                    }
+                }
+            }, "0"]
+        ]
+    })
+    assert len(res['methodResponses']) == 1
+    for method, response, tag in res['methodResponses']:
+        assert tag == "0"
+        assert method == "Mailbox/set"
+        newId = response['created']['test']['id']
+        assert not response['notCreated']
+        assert not response['updated']
+        assert not response['notUpdated']
+        assert not response['destroyed']
+        assert not response['notDestroyed']
+
+    # Destroy
+    res = handle_request(user, {
+        "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
+        "methodCalls": [
+            ["Mailbox/set", {
+                "accountId": user.username,
+                "destroy": [newId],
+            }, "0"]
+        ]
+    })
+    assert len(res['methodResponses']) == 1
+    for method, response, tag in res['methodResponses']:
+        assert tag == "0"
+        assert method == "Mailbox/set"
+        assert not response['created']
+        assert not response['notCreated']
+        assert not response['updated']
+        assert not response['notUpdated']
+        assert response['destroyed']
+        assert newId in response['destroyed']
+        assert not response['notDestroyed']
+
+
 def test_Email_query_inMailbox(db, user):
     res = handle_request(user, {
         "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
@@ -43,9 +94,9 @@ def test_Email_query_inMailbox(db, user):
                     "inMailbox": INBOX_ID # inbox
                 },
                 "position": 0,
-                "collapseThreads": True,
+                "collapseThreads": False,
                 "limit": 10,
-                "calculateTotal": True
+                "calculateTotal": False
             }, "0"]
         ]
     })
@@ -55,8 +106,8 @@ def test_Email_query_inMailbox(db, user):
         assert tag == "0"
         assert response['accountId'] == user.username
         assert response['position'] == 0
-        assert response['total']
-        assert response['collapseThreads'] == True
+        # assert response['total']
+        assert response['collapseThreads'] == False
         assert int(response['queryState']) > 0
         assert isinstance(response['ids'], list)
         assert len(response['ids']) > 0
@@ -78,7 +129,7 @@ def test_Email_get(db, user):
         "methodCalls": [
             ["Email/get", {
                 "accountId": user.username,
-                "ids": ["mdfe661a66", "notexisting"],
+                "ids": ["f1588506601_7", "notexisting"],
                 "properties": list(properties),
             }, "1"]
         ]

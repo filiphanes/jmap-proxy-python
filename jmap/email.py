@@ -19,60 +19,57 @@ def register_methods(api):
     })
 
 
-def api_Email_query(request, accountId, position=None, anchor=None,
-                    anchorOffset=None, sort={}, filter={}, limit=10,
+def api_Email_query(request, accountId, sort={}, filter={},
+                    position=None, anchor=None, anchorOffset=None, limit=10,
                     collapseThreads=False, calculateTotal=False):
-    try:
-        account = request.user.accounts[accountId]
-    except KeyError:
-        raise errors.accountNotFound()
-    user = account.db.get_user()
+    account = request.get_account(accountId)
 
-    newQueryState = user['jstateEmail']
+    newQueryState = account.db.highModSeqEmail
     if position is not None and anchor is not None:
-        raise ValueError('invalid arguments')
+        raise errors.invalidArguments()
     # anchor and anchorOffset must go together
     if (anchor is None) != (anchorOffset is None):
-        raise ValueError('invalid arguments')
+        raise errors.invalidArguments()
     
     start = position or 0
     if start < 0:
-        raise ValueError('invalid arguments')
-    rows = request.db.dget('jmessages', {'active': 1})
-    rows = [dict(row) for row in rows]
-    for row in rows:
-        row['keywords'] = json.loads(row['keywords'] or '{}')
-    storage = {'data': rows}
-    rows = _post_sort(rows, sort, storage)
-    if filter:
-        rows = _messages_filter(request, rows, filter, storage)
+        raise errors.invalidArguments()
     if collapseThreads:
-        rows = _collapse_messages(rows)
-    
+        raise errors.invalidArguments('collapseThreads not supported')
+        rows = account.db.get_messages(['id','threadId'], sort=sort, deleted=0, **filter)
+        ids = [r['id'] for r in _collapse_messages(rows)]
+    else:
+        ids = account.db.get_messages('id', sort=sort, deleted=0, **filter)
+
+
     if anchor:
         # need to calculate position
-        for i, row in enumerate(rows):
-            if row['msgid'] == anchor:
+        for i, row in enumerate(ids):
+            if row['id'] == anchor:
                 start = max(i + anchorOffset, 0)
                 break
         else:
-            raise Exception('anchor not found')
+            raise errors.anchorNotFound()
 
-    end = start + limit if limit else len(rows)
-    if end > len(rows):
-        end = len(rows)
+    end = min(start + limit, len(ids)) if limit else len(ids)
     
-    return {
-        'accountId': request.db.accountid,
+    out = {
+        'accountId': accountId,
         'filter': filter,
         'sort': sort,
         'collapseThreads': collapseThreads,
         'queryState': newQueryState,
         'canCalculateChanges': True,
         'position': start,
-        'total': len(rows),
-        'ids': [rows[i]['msgid'] for i in range(start, end)],
+        'total': len(ids),
+        'ids': ids[start:end],
     }
+
+    if calculateTotal:
+        out['total'] = len(ids)
+        raise errors.invalidArguments('calculateTotal not supported')
+
+    return out
 
 
 def api_Email_get(request,
@@ -85,13 +82,12 @@ def api_Email_get(request,
         fetchAllBodyValues=False,
         maxBodyValueBytes=0,
     ):
-    """https://jmap.io/spec-mail.html#emailget"""
-    try:
-        account = request.user.accounts[accountId]
-    except KeyError:
-        raise errors.accountNotFound()
-    user = account.db.get_user()
-    newState = user['jstateEmail']
+    """
+    https://jmap.io/spec-mail.html#emailget
+    https://jmap.io/spec-core.html#get
+    """
+    account = request.get_account(accountId)
+    newState = account.db.highModSeqEmail
     seenids = set()
     notFound = []
     lst = []
@@ -122,14 +118,14 @@ def api_Email_get(request,
 
     msgids = [request.idmap(i) for i in ids]
     if need_content:
-        contents = request.db.fill_messages(msgids)
+        contents = account.db.fill_messages(msgids)
     else:
         contents = {}
 
     for msgid in msgids:
         if msgid not in seenids:
             seenids.add(msgid)
-            data = request.db.dgetone('jmessages', {'msgid': msgid})
+            data = account.db.dgetone('jmessages', {'msgid': msgid})
             if not data:
                 notFound.append(msgid)
                 continue
@@ -140,7 +136,7 @@ def api_Email_get(request,
         if 'threadId' in properties:
             msg['threadId'] = data['thrid']
         if 'mailboxIds' in properties:
-            ids = request.db.dgetcol('jmessagemap', {'msgid': msgid, 'active': 1}, 'jmailboxid')
+            ids = account.db.dgetcol('jmessagemap', {'msgid': msgid, 'deleted': 0}, 'jmailboxid')
             msg['mailboxIds'] = {i: True for i in ids}
         if 'keywords' in properties:
             msg['keywords'] = json.loads(data['keywords'])
@@ -227,26 +223,22 @@ def api_Email_get(request,
 
 
 def api_Email_changes(request, accountId, sinceState, maxChanges=None):
-    try:
-        account = request.user.accounts[accountId]
-    except KeyError:
-        raise errors.accountNotFound()
-    user = account.db.get_user()
-    newState = user['jstateEmail']
+    account = request.get_account(accountId)
+    newState = account.db.highModSeqEmail
 
-    if user['jdeletedmodseq'] and sinceState <= str(user['jdeletedmodseq']):
+    if sinceState <= str(account.db.lowModSeq):
         raise errors.cannotCalculateChanges({'new_state': newState})
     
-    rows = request.db.dget('jmessages', {'jmodseq': ('>', sinceState)},
-                        'msgid,active,jcreated,jmodseq')
+    rows = account.db.dget('jmessages', {'jmodseq': ('>', sinceState)},
+                        'msgid,deleted,jcreated,jmodseq')
     if maxChanges and len(rows) > maxChanges:
         raise errors.cannotCalculateChanges({'new_state': newState})
 
     created = []
     updated = []
     removed = []
-    for msgid, active, jcreated in rows:
-        if active:
+    for msgid, deleted, jcreated in rows:
+        if not deleted:
             if jcreated <= sinceState:
                 updated.append(msgid)
             else:
@@ -266,28 +258,22 @@ def api_Email_changes(request, accountId, sinceState, maxChanges=None):
 
 
 def api_Email_set(request, accountId, create={}, update={}, destroy=()):
-    try:
-        account = request.user.accounts[accountId]
-    except KeyError:
-        raise errors.accountNotFound()
-    user = account.db.get_user()
+    account = request.get_account(accountId)
 
     # get state up-to-date first
-    request.db.sync_imap()
-    user = request.db.get_user()
-    oldState = user['jstateEmail']
-    created, notCreated = request.db.create_messages(create, request.idmap)
+    account.db.sync_imap()
+    oldState = account.db.highModSeqEmail
+    created, notCreated = account.db.create_messages(create, request.idmap)
     for id, msg in created.items():
         request.setid(id, msg['id'])
 
     resolve_patch(request, accountId, update, api_Email_get)
-    updated, notUpdated = request.db.update_messages(update, request._idmap)
-    destroyed, notDestroyed = request.db.destroy_messages(destroy)
+    updated, notUpdated = account.db.update_messages(update, request.idmap)
+    destroyed, notDestroyed = account.db.destroy_messages(destroy)
 
     # XXX - cheap dumb racy version
-    request.db.sync_imap()
-    user = request.db.get_user()
-    newState = user['jstateEmail']
+    account.db.sync_imap()
+    newState = account.db.highModSeqEmail
 
     for cid, msg in created.items():
         created[cid]['blobId'] = msg['id']
@@ -320,23 +306,19 @@ def _post_sort(data, sortargs, storage):
     }
 
 
-def _load_msgmap(request, id):
-    rows = request.db.dget('jmessagemap', {}, 'msgid,jmailbox,jmodseq,active')
+def _load_msgmap(account, id):
+    rows = account.db.dget('jmessagemap', {}, 'msgid,jmailbox,jmodseq,deleted')
     msgmap = defaultdict(dict)
     for row in rows:
         msgmap[row['msgid']][row['jmailbox']] = row
     return msgmap
 
 
-def _load_hasatt(request):
-    return set(request.db.dgetcol('jrawmessage', {'hasAttachment':1}, 'msgid'))
-
-
 def _hasthreadkeyword(messages):
     res = {}
     for msg in messages:
-        # we get called by getEmailListUpdates, which includes inactive messages
-        if not msg['active']:
+        # we get called by getEmailListUpdates, which includes deleted messages
+        if msg['deleted']:
             continue
         # have already seen a message for this thread
         if msg['thrid'] in res:
@@ -354,31 +336,46 @@ def _hasthreadkeyword(messages):
     return res
 
 
-def _match(request, item, condition, storage):
+def _match(account, item, condition, storage, idmap):
     if 'operator' in condition:
-        return _match_operator(request, item, condition, storage)
+        if condition['operator'] == 'NOT':  # NOR
+            for cond in condition['conditions']:
+                if _match(account, item, cond, storage, idmap):
+                    return False
+            return True
+        elif condition['operator'] == 'OR':
+            for cond in condition['conditions']:
+                if _match(account, item, cond, storage, idmap):
+                    return True
+            return False
+        elif condition['operator'] == 'AND':
+            for cond in condition['conditions']:
+                if not _match(account, item, cond, storage, idmap):
+                    return False
+            return True
+        raise ValueError(f"Invalid operator {condition['operator']}")
     
     cond = condition.get('inMailbox', None)
     if cond:
-        id = request.idmap(cond)
+        id = idmap(cond)
         if 'mailbox' not in storage:
             storage['mailbox'] = {}
         if id not in storage['mailbox']:
-            storage['mailbox'][id] = request.db.dgetby('jmessagemap', 'msgid', {'jmailboxid': id}, 'msgid,jmodseq,active')
+            storage['mailbox'][id] = account.db.dgetby('jmessagemap', 'msgid', {'jmailboxid': id}, 'msgid,jmodseq,deleted')
         if item['msgid'] not in storage['mailbox'][id]\
-            or not storage['mailbox'][id][item['msgid']]['active']:
+            or storage['mailbox'][id][item['msgid']]['deleted']:
             return False
     
     cond = condition.get('inMailboxOtherThan', None)
     if cond:
         if 'msgmap' not in storage:
-            storage['msgmap'] = _load_msgmap(request)
+            storage['msgmap'] = _load_msgmap(account)
         if not isinstance(cond, list):
             cond = [cond]
-        match = set(request.idmap(id) for id in cond)
+        match = set(idmap(id) for id in cond)
         data = storage['msgmap'].get(item['msgid'], {})
         for id, msg in data.items():
-            if id not in match and msg['active']:
+            if id not in match and not msg['deleted']:
                 break
         else:
             return False
@@ -386,7 +383,7 @@ def _match(request, item, condition, storage):
     cond = condition.get('hasAttachment', None)
     if cond is not None:
         if 'hasatt' not in storage:
-            storage['hasatt'] = _load_hasatt(request)
+            storage['hasatt'] = set(account.db.dgetcol('jrawmessage', {'hasAttachment':1}, 'msgid'))
         if item['msgid'] not in storage['hasatt']:
             return False
     
@@ -406,8 +403,9 @@ def _match(request, item, condition, storage):
                 search.append(field)
                 search.append(condition[cond])
 
+        # TODO: this is not correct when there are searches in multiple filter branches
         if search:
-            storage['search'] = set(request.db.imap.search(search))
+            storage['search'] = set(account.db.imap.search(search))
         else:
             storage['search'] = None
 
@@ -419,29 +417,6 @@ def _match(request, item, condition, storage):
     #TODO: noneInThreadHaveKeyword
 
     return True
-
-
-def _match_operator(request, item, filter, storage):
-    if filter['operator'] == 'NOT':
-        return not _match_operator(request, item, {
-            'operator': 'OR',
-            'conditions': filter['conditions']},
-            storage)
-    elif filter['operator'] == 'OR':
-        for condition in filter['conditions']:
-            if _match(request, item, condition, storage):
-                return True
-            return False
-    elif filter['operator'] == 'AND':
-        for condition in filter['conditions']:
-            if not _match(request, item, condition, storage):
-                return False
-            return True
-    raise ValueError(f"Invalid operator {filter['operator']}")
-
-
-def _messages_filter(request, data, filter, storage):
-    return [d for d in data if _match(request, d, filter, storage)]
 
 
 def _collapse_messages(messages):

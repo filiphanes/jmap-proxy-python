@@ -12,6 +12,7 @@ except ImportError:
 
 from jmap import parse
 
+
 TABLE2GROUPS = {
   'jmessages': ['Email'],
   'jthreads': ['Thread'],
@@ -29,11 +30,12 @@ TABLE2GROUPS = {
   'jcalendarprefs': ['CalendarPreferences'],
 }
 
+
 class BaseDB:
     def __init__(self, accountid, path='./data/'):
         self.accountid = accountid
         self.dbpath = os.path.join(path, accountid + '.db')
-        print('Opening dbh', self.dbpath)
+        print('Opening dbpath', self.dbpath)
         self.dbh = sqlite3.connect(self.dbpath, isolation_level='DEFERRED')
         self.dbh.execute("PRAGMA journal_mode=WAL")
         self.dbh.row_factory = sqlite3.Row
@@ -69,8 +71,8 @@ class BaseDB:
                     COUNT(DISTINCT msgid)
                 FROM jmessages JOIN jmessagemap USING (msgid)
                 WHERE jmailboxid = ?
-                  AND jmessages.active = 1
-                  AND jmessagemap.active = 1
+                  AND jmessages.deleted = 0
+                  AND jmessagemap.deleted = 0
                 """, [jmailboxid])
             update['totalEmails'] = self.cursor.fetchone()[0]
 
@@ -79,8 +81,8 @@ class BaseDB:
                 FROM jmessages JOIN jmessagemap USING (msgid)
                 WHERE jmailboxid = ?
                   AND jmessages.isUnread = 1
-                  AND jmessages.active = 1
-                  AND jmessagemap.active = 1
+                  AND jmessages.deleted = 0
+                  AND jmessagemap.deleted = 0
                 """, [jmailboxid])
             update['unreadEmails'] = self.cursor.fetchone()[0]
 
@@ -88,14 +90,14 @@ class BaseDB:
                 COUNT(DISTINCT thrid)
                 FROM jmessages JOIN jmessagemap USING (msgid)
                 WHERE jmailboxid = ?
-                  AND jmessages.active = 1
-                  AND jmessagemap.active = 1
+                  AND jmessages.deleted = 0
+                  AND jmessagemap.deleted = 0
                   AND thrid IN
                         (SELECT thrid
                         FROM jmessages JOIN jmessagemap USING (msgid)
                         WHERE isUnread = 1
-                            AND jmessages.active = 1
-                            AND jmessagemap.active = 1)
+                            AND jmessages.deleted = 0
+                            AND jmessagemap.deleted = 0)
                 """ , [jmailboxid])
             update['totalThreads'] = self.cursor.fetchone()[0]
 
@@ -104,7 +106,7 @@ class BaseDB:
 
         if self.modseq and self.change_cb:
             map = {}
-            dbdata = {'jhighestmodseq': self.modseq}
+            dbdata = {'highModSeq': self.modseq}
             state = self.modseq
             for table in self.tables.keys():
                 for group in TABLE2GROUPS[table]:
@@ -131,7 +133,7 @@ class BaseDB:
     def dirty(self, table):
         if not self.modseq:
             user = self.get_user()
-            self.modseq = user['jhighestmodseq'] = user['jhighestmodseq'] + 1
+            self.modseq = user['highModSeq'] = user['highModSeq'] + 1
         self.tables[table] = self.modseq
         return self.modseq
 
@@ -142,7 +144,7 @@ class BaseDB:
             return dict(row)
         else:
             self.cursor.execute("INSERT INTO account "
-                " (email,displayname, jhighestmodseq) VALUES (?,?,?)",
+                " (email,displayname, highModSeq) VALUES (?,?,?)",
                 [self.accountid, self.accountid, 1])
             return self.get_user()
 
@@ -152,10 +154,10 @@ class BaseDB:
             thrid, = self.cursor.fetchone()
         except ValueError:  # not found
             return
-        self.cursor.execute("SELECT msgid,isDraft,inReplyTo,messageId FROM jmessages WHERE thrid=? AND active=1", [thrid])
+        self.cursor.execute("SELECT msgid,isDraft,inReplyTo,messageId FROM jmessages WHERE thrid=? AND deleted=0", [thrid])
         messages = self.cursor.fetchall()
         if not messages:
-            self.dmaybedirty('jthreads', {'active': 0, 'data': '[]'}, {'thrid': thrid})
+            self.dmaybedirty('jthreads', {'deleted': 1, 'data': '[]'}, {'thrid': thrid})
             return
         
         drafts = defaultdict(list)
@@ -183,7 +185,7 @@ class BaseDB:
         self.cursor.execute("SELECT jcreated FROM jthreads WHERE thrid=?", [thrid])
         if self.cursor.fetchone():
             self.dmaybedirty('jthreads',
-                             {'active': 1, 'data': json.dumps(msgs)},
+                             {'deleted': 0, 'data': json.dumps(msgs)},
                              {'thrid': thrid})
         else:
             self.dmake('jthreads', {'thrid': thrid, 'data': json.dumps(msgs)})
@@ -211,7 +213,7 @@ class BaseDB:
         self.ddirty('jmessages', {}, {'msgid': msgid})
     
     def delete_message_from_mailbox(self, msgid, jmailboxid):
-        data = {'active': 0}
+        data = {'deleted': datetime.now().timestamp()}
         self.dmaybedirty('jmessagemap', data, {
             'msgid': msgid,
             'jmailboxid': jmailboxid,
@@ -229,7 +231,7 @@ class BaseDB:
 
         oldids = self.dgetcol('jmessagemap', {
             'msgid': msgid,
-            'active': 1,
+            'deleted': 0,
         }, 'jmailboxid')
         old = set(oldids)
 
@@ -295,8 +297,8 @@ class BaseDB:
         return NotImplementedError()
     
     def delete_message(self, msgid):
-        self.dmaybedirty('jmessages', {'active': 0}, {'msgid': msgid})
-        oldids = self.dgetcol('jmessagemap', {'msgid': msgid, 'active': 1}, 'jmailboxid')
+        self.dmaybedirty('jmessages', {'deleted': datetime.now().timestamp()}, {'msgid': msgid})
+        oldids = self.dgetcol('jmessagemap', {'msgid': msgid, 'deleted': 0}, 'jmailboxid')
         for oldid in oldids:
             self.delete_message_from_mailbox(msgid, oldid)
         self.touch_thread_by_msgid(msgid)
@@ -344,7 +346,7 @@ class BaseDB:
         values['jmodseq'] = modseq
         for field in modseqfields:
             values[field] = modseq
-        values['active'] = 1
+        values['deleted'] = 0
         return self.dinsert(table, values)
 
     def dupdate(self, table, values, filter={}):
@@ -388,7 +390,7 @@ class BaseDB:
 
     def dnuke(self, table, filter={}):
         modseq = self.dirty(table)
-        sql = f'UPDATE {table} SET active=0, jmodseq=? WHERE active=1'
+        sql = f'UPDATE {table} SET deleted=1, jmodseq=? WHERE deleted=0'
         if filter:
             sql += ' AND ' + ' AND '.join([k + '=?' for k in filter.keys()])
         return self.cursor.execute(sql, [modseq] + filter.values())
@@ -484,9 +486,8 @@ class BaseDB:
             jcreated INTEGER,
             jmodseq INTEGER,
             mtime DATE,
-            active BOOLEAN
+            deleted INTEGER DEFAULT 0
         );""")
-
         self.dbh.execute("CREATE INDEX IF NOT EXISTS jthrid ON jmessages (thrid)")
         self.dbh.execute("CREATE INDEX IF NOT EXISTS jmessageid ON jmessages (messageId)")
 
@@ -497,7 +498,7 @@ class BaseDB:
             jcreated INTEGER,
             jmodseq INTEGER,
             mtime DATE,
-            active BOOLEAN
+            deleted INTEGER DEFAULT 0
         );""")
 
         self.dbh.execute("""
@@ -525,7 +526,7 @@ class BaseDB:
             jmodseq INTEGER,
             jnoncountsmodseq INTEGER,
             mtime DATE,
-            active BOOLEAN
+            deleted INTEGER DEFAULT 0
         );""")
 
         self.dbh.execute("""
@@ -535,7 +536,7 @@ class BaseDB:
             jcreated INTEGER,
             jmodseq INTEGER,
             mtime DATE,
-            active BOOLEAN,
+            deleted INTEGER DEFAULT 0,
             PRIMARY KEY (jmailboxid, msgid)
         );""")
 
@@ -546,11 +547,11 @@ class BaseDB:
             email TEXT,
             displayname TEXT,
             picture TEXT,
-            jdeletedmodseq INTEGER NOT NULL DEFAULT 1,
-            jhighestmodseq INTEGER NOT NULL DEFAULT 1,
-            jstateMailbox TEXT NOT NULL DEFAULT 1,
-            jstateThread TEXT NOT NULL DEFAULT 1,
-            jstateEmail TEXT NOT NULL DEFAULT 1,
+            lowModSeq INTEGER NOT NULL DEFAULT 0,
+            highModSeq INTEGER NOT NULL DEFAULT 1,
+            highModSeqMailbox TEXT NOT NULL DEFAULT 1,
+            highModSeqThread TEXT NOT NULL DEFAULT 1,
+            highModSeqEmail TEXT NOT NULL DEFAULT 1,
             jstateContact TEXT NOT NULL DEFAULT 1,
             jstateContactGroup TEXT NOT NULL DEFAULT 1,
             jstateCalendar TEXT NOT NULL DEFAULT 1,
@@ -577,136 +578,5 @@ class BaseDB:
             content BLOB,
             expires DATE,
             mtime DATE,
-            active BOOLEAN
+            deleted INTEGER DEFAULT 0
         );""")
-
-        self.dbh.execute("""
-        CREATE TABLE IF NOT EXISTS jcalendars (
-            jcalendarid INTEGER PRIMARY KEY,
-            name TEXT,
-            color TEXT,
-            isVisible BOOLEAN,
-            mayReadFreeBusy BOOLEAN,
-            mayReadItems BOOLEAN,
-            mayAddItems BOOLEAN,
-            mayModifyItems BOOLEAN,
-            mayRemoveItems BOOLEAN,
-            mayDelete BOOLEAN,
-            mayRename BOOLEAN,
-            jcreated INTEGER,
-            jmodseq INTEGER,
-            mtime DATE,
-            active BOOLEAN
-        );""")
-
-        self.dbh.execute("""
-        CREATE TABLE IF NOT EXISTS jevents (
-            eventuid TEXT PRIMARY KEY,
-            jcalendarid INTEGER,
-            firststart DATE,
-            lastend DATE,
-            payload TEXT,
-            jcreated INTEGER,
-            jmodseq INTEGER,
-            mtime DATE,
-            active BOOLEAN
-        );""")
-
-        self.dbh.execute("CREATE INDEX IF NOT EXISTS jeventcal ON jevents (jcalendarid)")
-
-        self.dbh.execute("""
-        CREATE TABLE IF NOT EXISTS jaddressbooks (
-            jaddressbookid INTEGER PRIMARY KEY,
-            name TEXT,
-            isVisible BOOLEAN,
-            mayReadItems BOOLEAN,
-            mayAddItems BOOLEAN,
-            mayModifyItems BOOLEAN,
-            mayRemoveItems BOOLEAN,
-            mayDelete BOOLEAN,
-            mayRename BOOLEAN,
-            jcreated INTEGER,
-            jmodseq INTEGER,
-            mtime DATE,
-            active BOOLEAN
-        ); """)
-
-        self.dbh.execute("""
-        CREATE TABLE IF NOT EXISTS jcontactgroups (
-            groupuid TEXT PRIMARY KEY,
-            jaddressbookid INTEGER,
-            name TEXT,
-            jcreated INTEGER,
-            jmodseq INTEGER,
-            mtime DATE,
-            active BOOLEAN
-        );""")
-
-        self.dbh.execute("CREATE INDEX IF NOT EXISTS jgroupbook ON jcontactgroups (jaddressbookid)")
-
-        self.dbh.execute("""
-        CREATE TABLE IF NOT EXISTS jcontactgroupmap (
-            groupuid TEXT,
-            contactuid TEXT,
-            mtime DATE,
-            PRIMARY KEY (groupuid, contactuid)
-        );""")
-
-        self.dbh.execute("CREATE INDEX IF NOT EXISTS jcontactmap ON jcontactgroupmap (contactuid)")
-
-        self.dbh.execute("""
-        CREATE TABLE IF NOT EXISTS jcontacts (
-            contactuid TEXT PRIMARY KEY,
-            jaddressbookid INTEGER,
-            isFlagged BOOLEAN,
-            payload TEXT,
-            jcreated INTEGER,
-            jmodseq INTEGER,
-            mtime DATE,
-            active BOOLEAN
-        );""")
-
-        self.dbh.execute("CREATE INDEX IF NOT EXISTS jcontactbook ON jcontacts (jaddressbookid)")
-
-        self.dbh.execute("""
-        CREATE TABLE IF NOT EXISTS jsubmission (
-            jsubid INTEGER PRIMARY KEY,
-            msgid TEXT,
-            thrid TEXT,
-            envelope TEXT,
-            sendAt INTEGER,
-            jcreated INTEGER,
-            jmodseq INTEGER,
-            mtime DATE,
-            active BOOLEAN
-        );""")
-
-        self.dbh.execute("""
-        CREATE TABLE IF NOT EXISTS juserprefs (
-            jprefid TEXT PRIMARY KEY,
-            payload TEXT,
-            jcreated INTEGER,
-            jmodseq INTEGER,
-            mtime DATE,
-            active BOOLEAN
-        );""")
-
-        self.dbh.execute("""
-        CREATE TABLE IF NOT EXISTS jclientprefs (
-            jprefid TEXT PRIMARY KEY,
-            payload TEXT,
-            jcreated INTEGER,
-            jmodseq INTEGER,
-            mtime DATE,
-            active BOOLEAN
-        );""")
-
-        self.dbh.execute("""
-        CREATE TABLE IF NOT EXISTS jcalendarprefs (
-            jprefid TEXT PRIMARY KEY,
-            payload TEXT,
-            jcreated INTEGER,
-            jmodseq INTEGER,
-            mtime DATE,
-            active BOOLEAN
-        );""" )

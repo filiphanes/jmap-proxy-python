@@ -9,11 +9,13 @@ except ImportError:
     import json
 
 from imapclient import IMAPClient
+from imapclient.exceptions import IMAPClientError
 from imapclient.response_types import Envelope
-from jmap import parse
+from jmap import errors, parse
 
 from .base import BaseDB
 from email.header import decode_header, make_header
+
 
 TAG = 1
 
@@ -67,188 +69,62 @@ class ImapDB(BaseDB):
         super().__init__(username, *args, **kwargs)
         self.imap = IMAPClient(host, port, use_uid=True, ssl=False)
         res = self.imap.login(username, password)
-        
-    
-    def sync_folders(self):
-        "Synchronise list from IMAP to local folder cache"
-        self.cursor.execute("SELECT * FROM ifolders")
-        ifolders = self.cursor.fetchall()
-        ibylabel = {f['label']: f for f in ifolders}
-        seen = set()
-        getstatus = {}
-        getuniqueid = {}
+        self.cursor.execute("SELECT lowModSeq,highModSeq,highModSeqMailbox,highModSeqThread,highModSeqEmail FROM account LIMIT 1")
+        row = self.cursor.fetchone()
+        self.lastfoldersync = 0
+        if row:
+            self.lowModSeq,
+            self.highModSeq,
+            self.highModSeqMailbox,
+            self.highModSeqThread,
+            self.highModSeqEmail = row
+        else:
+            self.lowModSeq = 0
+            self.highModSeq = 1
+            self.highModSeqMailbox = 1
+            self.highModSeqThread = 1
+            self.highModSeqEmail = 1
 
-        prefix = ''
-        for flags, sep, name in self.imap.list_folders():
-            sep = sep.decode()
-            roles = [f for f in flags if f.lower() not in KNOWN_SPECIALS]
-            if roles:
-                label = roles[0].decode()
+        self.mailboxes = {}
+        self.sync_mailboxes()
+
+
+    def get_messages(self, fields=(), sort={}, inMailbox=None, id__in=(), **filter):
+        if inMailbox is None:
+            # TODO: implement optional inMailbox
+            raise errors.invalidArguments('This JMAP implementation requires inMailbox filter')
+
+        mailbox = self.mailboxes.get(inMailbox, None)
+        if not mailbox:
+            raise errors.notFound(f'Mailbox {inMailbox} not found')
+        fullname = self.mailbox_fullname(mailbox['parentId'], mailbox['name'])
+        self.imap.select_folder(fullname, readonly=True)
+
+        if id__in:
+            uids = [int(id.split('_')[1]) for id in id__in]
+        else:
+            search_criteria = as_imap_search(filter) or 'ALL'
+            if sort:
+                sort_criteria = as_imap_sort(sort) or None
+                uids = self.imap.sort(sort_criteria, search_criteria)
             else:
-                label = name
-            if label in ibylabel:
-                folder = ibylabel[label]
-                id = folder['ifolderid']
-                self.dmaybeupdate('ifolders',
-                    {'sep': sep, 'imapname': name},
-                    {'ifolderid': id})
-                if not folder['uidvalidity']:
-                    getstatus[name] = id
-                if not folder['uniqueid']:
-                    getuniqueid[name] = id
-            else:
-                id = self.dinsert('ifolders', {
-                    'sep': sep,
-                    'imapname': name,
-                    'label': label,
-                    })
-                getstatus[name] = id
-                getuniqueid[name] = id
-            seen.add(id)
-        
-        # delete not existing folders
-        for f in ifolders:
-            if f['ifolderid'] not in seen:
-                self.ddelete('ifolders', {'ifolderid': f['ifolderid']})
-        
-        self.dmaybeupdate('iserver', {
-            'imapPrefix': prefix,
-            'lastfoldersync': datetime.now().isoformat(),
-        })
-        # self.commit()
+                uids = self.imap.search(search_criteria)
 
-        for name, id in getstatus.items():
-            status = self.imap.folder_status(name, ['UIDVALIDITY', 'UIDNEXT', 'HIGHESTMODSEQ'])
-            self.dmaybeupdate('ifolders', {
-                'uidvalidity': status[b'UIDVALIDITY'],
-                'highestmodseq': status[b'HIGHESTMODSEQ'],
-                'uidnext': status[b'UIDNEXT'],
-                'uidfirst': status[b'UIDNEXT'],
-            }, {'ifolderid': id})
-        self.commit()
-        self.sync_jmailboxes()
+        if fields == 'id':
+            return [f"{inMailbox}_{uid}" for uid in uids]
 
-    def sync_jmailboxes(self):
-        "synchronise from the imap folder cache to the jmap mailbox listing"
-        jmailboxes = self.dget('jmailboxes')
+        messages = {}
+        res = self.imap.fetch(uids, as_imap_fields(fields.split(',')))
+        for uid, msg in res.items():
+            # TODO
+            messages[uid] = msg
+        return messages
 
-        jbyid = {}
-        roletoid = {}
-        byname = defaultdict(dict)
-        for mbox in jmailboxes:
-            jbyid[mbox['jmailboxid']] = mbox
-            if mbox['role']:
-                roletoid[mbox['role']] = mbox['jmailboxid']
-            byname[mbox['parentId'] or ''][mbox['name']] = mbox['jmailboxid']
-        
-        seen = set()
-        self.cursor.execute("SELECT * FROM ifolders")
-        ifolders = self.cursor.fetchall()
-        for folder in ifolders:
-            print('folder:', list(folder))
-            fname = folder['imapname']
-            # check for roles first
-            #TODO: n.decode('IMAP-UTF-7')
-            bits = [n for n in fname.split(folder['sep'])]
-            if bits[0] == 'INBOX' and len(bits) > 1:
-                bits = bits[1:]
-            if not bits:
-                continue
-            role = ROLE_MAP.get((folder['label'] or '').lower(), None)
-            id = ''
-            parentId = ''
-            name = None
-            if role:
-                sortOrder = 2
-            elif role == 'inbox':
-                sortOrder = 1
-            else:
-                sortOrder = 3
-            while bits:
-                name, *bits = bits
-                if id:
-                    seen.add(id)
-                parentId = id
-                id = byname[parentId].get(name, None)
-                if id is None and bits:
-                    # need to create intermediate folder ...
-                    # XXX  - label noselect?
-                    id = str(uuid.uuid4())
-                    self.dmake('jmailboxes', {
-                            'name': name,
-                            'jmailboxid': id,
-                            'sortOrder': 4,
-                            'parentId': parentId,
-                        },
-                        'jnoncountsmodseq')
-                    byname[parentId][name] = id
-            if not name:
-                continue
-            # TODO: get MYRIGHTS and SUBSCRIBED from server?
-            details = {
-                'name': name,
-                'parentId': parentId,
-                'sortOrder': sortOrder,
-                'isSubscribed': 1,
-                'mayReadItems': 1,
-                'mayAddItems': 1,
-                'mayRemoveItems': 1,
-                'maySetSeen': 1,
-                'maySetKeywords': 1,
-                'mayCreateChild': 1,
-                'mayRename': 0 if role else 1,
-                'mayDelete': 0 if role else 1,
-                'maySubmit': 1,
-                'active': 1,
-            }
-            if id:
-                if role and role in roletoid and roletoid[role] != id:
-                    # still gotta move it
-                    id = roletoid[role]
-                    self.dmaybedirty('jmailboxes', details, {'jmailboxid': id}, ['jnoncountsmodseq'])
-                elif not jbyid[id]['active']:
-                    # reactivate!
-                    self.dmaybedirty('jmailboxes', {'active': 1}, {'jmailboxid': id}, ['jnoncountsmodseq'])
-            else:
-                # case: role - we need to see if there's a case for moving this thing
-                id = roletoid.get(role, None)
-                if id:
-                    self.dmaybedirty('jmailboxes', details, {'jmailboxid': id}, ['jnoncountsmodseq'])
-                else:
-                    id = folder['uniqueid'] or str(uuid.uuid4())
-                    del details['active']
-                    details['role'] = role
-                    details['jmailboxid'] = id
-                    self.dmake('jmailboxes', details, ['jnoncountsmodseq'])
-                    byname[parentId][name] = id
-                    if role:
-                        roletoid[role] = id
-            seen.add(id)
-            self.dmaybeupdate('ifolders', {'jmailboxid': id},
-                {'ifolderid': folder['ifolderid']})
-            
-        for mailbox in jmailboxes:
-            id = mailbox['jmailboxid']
-            if mailbox['active'] and id not in seen:
-                self.dmaybeupdate('jmailboxes', {'active': 0}, {'jmailboxid': id})
-
-        self.commit()
 
     def labels(self):
         self.cursor.execute('SELECT label,ifolderid,jmailboxid,imapname FROM ifolders')
         return {label: (ifolderid, jmailboxid, imapname) for label, ifolderid, jmailboxid, imapname in self.cursor}
     
-    def sync_imap(self):
-        self.cursor.execute('SELECT ifolderid,label,imapname,uidvalidity,highestmodseq FROM ifolders')
-        rows = self.cursor.fetchall()
-        for ifolderid, label, imapname, uidvalidity, highestmodseq in rows:
-            status = self.imap.folder_status(imapname, ['UIDVALIDITY', 'HIGHESTMODSEQ'])
-            # TODO: better handling of uidvalidity change?
-            if status[b'UIDVALIDITY']   != uidvalidity or \
-               status[b'HIGHESTMODSEQ'] != highestmodseq:
-                self.do_folder(ifolderid, label)
-        self.sync_jmap()
-
     def backfill(self):
         rest = 500
         self.cursor.execute('SELECT ifolderid, label FROM ifolders'
@@ -530,7 +406,7 @@ class ImapDB(BaseDB):
                         self.imap.set_flags(uids, flags, silent=True)
 
                 if 'mailboxIds' in action:
-                    mboxes = [idmap.get(k, k) for k in action['mailboxIds'].keys()]
+                    mboxes = [idmap(k) for k in action['mailboxIds'].keys()]
                     # existing ifolderids containing this message
                     # identify a source message to work from
                     ifolderid = sorted(map[msgid])[0]
@@ -637,7 +513,7 @@ class ImapDB(BaseDB):
 
         if not jmailboxids:
             return self.delete_message(msgid)
-        self.cursor.execute("SELECT msgid FROM jmessages WHERE msgid=? AND active=1", [msgid])
+        self.cursor.execute("SELECT msgid FROM jmessages WHERE msgid=? AND deleted=NULL", [msgid])
         if self.cursor.fetchone():
             return self.change_message(msgid, {'keywords': keywords}, jmailboxids)
         else:
@@ -662,6 +538,7 @@ class ImapDB(BaseDB):
             self.cursor.execute('DELETE FROM imsgidtodo WHERE msgid=?', [msgid])
         if msgids:
             self.commit()
+
 
     def fill_messages(self, ids):
         if not ids:
@@ -711,6 +588,7 @@ class ImapDB(BaseDB):
         # stillneed = ids.difference(result.keys())
         return result
 
+
     def get_raw_message(self, msgid, part=None):
         self.cursor.execute('SELECT imapname,uidvalidity,uid FROM ifolders JOIN imessages USING (ifolderid) WHERE msgid=?', [msgid])
         imapname, uidvalidity, uid = self.cursor.fetchone()
@@ -721,137 +599,141 @@ class ImapDB(BaseDB):
             parsed = self.fill_messages([msgid])
             typ = find_type(parsed[msgid], part)
 
+
         res = self.imap.getpart(imapname, uidvalidity, uid, part)
         return typ, res['data']
     
-    def create_mailboxes(self, new):
-        if not new:
-            return {}, {}
-        todo = set()
-        notcreated = {}
-        for cid, mailbox in new.items():
-            if not mailbox.get('name', ''):
-                notcreated[cid] = {'type': 'invalidProperties', 'description': 'name is required'}
-                continue
-            try:
-                encname = mailbox['name'].encode('IMAP-UTF-7')
-            except Exception:
-                notcreated[cid] = {'type': 'invalidProperties', 'description': 'name, can\'t be used with IMAP proxy'}
-            if mailbox.get('parentId', None):
-                row = self.dgetone('ifolders', {'jmailboxid': mailbox['parentId']}, 'imapname,sep')
-                if not row:
-                    notcreated[cid] = {'type': 'notFound', 'description': 'parent folder not found'}
-                    continue
-                todo[cid] = [row['imapname'] + row['sep'] + encname, row['sep']]
-            else:
-                for sep, in self.dbh.execute('SELECT sep FROM ifolders ORDER BY ifolderid'):
-                    prefix = self.dgetfield('iserver', {}, 'imapPrefix')
-                if not prefix:
-                    prefix = ''
-                todo[cid] = [prefix + encname, sep]
-        createmap = {}
+    def get_mailboxes(self, fields=None, **filter):
+        byfullname = {}
+        # TODO: LIST "" % RETURN (STATUS (UNSEEN MESSAGES HIGHESTMODSEQ MAILBOXID))
+        for flags, sep, fullname in self.imap.list_folders():
+            status = self.imap.folder_status(fullname, (['MESSAGES', 'UIDVALIDITY', 'UIDNEXT', 'HIGHESTMODSEQ']))
+            flags = [f.lower() for f in flags]
+            roles = [f for f in flags if f not in KNOWN_SPECIALS]
+            label = roles[0].decode() if roles else fullname
+            role = ROLE_MAP.get(label, None)
+            can_select = b'\\noselect' not in flags
+            byfullname[fullname] = {
+                # expecting uidvalidity is generated as unique timestamp by imap
+                'id': f"f{status[b'UIDVALIDITY']}",
+                'parentId': None,
+                'name': fullname,
+                'role': role,
+                'sortOrder': 2 if role else (1 if role == 'inbox' else 3),
+                'isSubscribed': True,  # TODO: use LSUB
+                'totalEmails': status[b'MESSAGES'],
+                'unreadEmails': 0,
+                'totalThreads': 0,
+                'unreadThreads': 0,
+                'myRights': {
+                    'mayReadItems': can_select,
+                    'mayAddItems': can_select,
+                    'mayRemoveItems': can_select,
+                    'maySetSeen': can_select,
+                    'maySetKeywords': can_select,
+                    'mayCreateChild': True,
+                    'mayRename': False if role else True,
+                    'mayDelete': False if role else True,
+                    'maySubmit': can_select,
+                },
+                'sep': sep.decode(),
+                # Data sync properties
+                'createdModSeq': status[b'UIDVALIDITY'],  # TODO: persist
+                'updatedModSeq': status[b'UIDVALIDITY'],  # TODO: from persistent storage
+                'updatedNotCountsModSeq': status[b'UIDVALIDITY'],  # TODO: from persistent storage
+                'highestUID': status[b'UIDNEXT'] - 1,
+                'emailHighestModSeq': status[b'HIGHESTMODSEQ'],
+                'deleted': 0,
+            }
+
+        # set name and parentId for child folders
+        for fullname, mailbox in byfullname.items():
+            names = fullname.rsplit(mailbox['sep'], maxsplit=1)
+            if len(names) == 2:
+                mailbox['parentId'] = byfullname[names[0]]['id']
+                mailbox['name'] = names[1]
+
+        # update cache
+        self.mailboxes = {mbox['id']: mbox for mbox in byfullname.values()}
+        return byfullname.values()
+
+
+    def sync_mailboxes(self):
+        self.get_mailboxes()
     
-    def update_mailboxes(self, update, idmap):
-        if not update:
-            return {}, {}
-        changed = {}
-        notchanged = {}
-        namemap = {}
-        # XXX - reorder the crap out of this if renaming multiple mailboxes due to deep rename
-        for jid, mailbox in update.items():
-            if not mailbox:
-                notchanged[jid] = {'type': 'invalidProperties', 'description': "nothing to change"}
-            continue
 
-            data = self.dgetone('jmailboxes', {'jmailboxid': jid})
-            for key in mailbox.keys():  # TODO: check if valid
-                data[key] = update[key]
-            parentId = data['parentId']
-            if parentId:
-                parentId = idmap.get(parentId, parentId)
-            
-            try:
-                encname = data['name'].encode('IMAP-UTF-7')
-            except ValueError:
-                notchanged[jid] = {'type': 'invalidProperties', 'description': "name can\'t be used with IMAP proxy"}
-                continue
+    def mailbox_fullname(self, parentId, name):
+        while parentId:
+            parent = self.mailboxes.get(parentId, None)
+            if not parent:
+                raise errors.notFound('parent folder not found')
+            name = parent['name'] + parent['sep'] + name
+            parentId = parent.get('parentId', None)
+        return name
 
-            old = self.dgeone('ifolders', {'jmailboxid': jid}, 'imapname,ifolderid')
-            if parentId:
-                parent = self.dgetone('ifolders', {'jmailboxid': parentId}, 'imapname,sep')
-                if not parent:
-                    notchanged[jid] = {'type': 'invalidProperties', 'description': "parent folder not found"}
-                namemap[old['imapname']] = (parent['imapname'] + parent['sep'] + encname, jid, old['ifolderid'])
+
+    def create_mailbox(self, name=None, parentId=None, isSubscribed=True, **kwargs):
+        if not name:
+            raise errors.invalidProperties('name is required')
+        fullname = self.mailbox_fullname(parentId, name)
+        # TODO: parse returned MAILBOXID
+        try:
+            res = self.imap.create_folder(fullname)
+        except IMAPClientError as e:
+            desc = str(e)
+            if '[ALREADYEXISTS]' in desc:
+                raise errors.invalidArguments(desc)
+        except Exception:
+            raise errors.serverFail(res.decode())
+
+        if not isSubscribed:
+            self.imap.unsubscribe_folder(fullname)
+
+        status = self.imap.folder_status(fullname, ['UIDVALIDITY'])
+        self.sync_mailboxes()
+        return f"f{status[b'UIDVALIDITY']}"
+
+
+    def update_mailbox(self, id, name=None, parentId=None, isSubscribed=None, sortOrder=None, **update):
+        mailbox = self.mailboxes.get(id, None)
+        if not mailbox:
+            raise errors.notFound('mailbox not found')
+        fullname = self.mailbox_fullname(mailbox['parentId'], mailbox['name'])
+
+        if (name is not None and name != mailbox['name']) or \
+           (parentId is not None and parentId != mailbox['parentId']):
+            if not name:
+                raise errors.invalidProperties('name is required')
+            newfullname = self.mailbox_fullname(parentId, name)
+            res = self.imap.rename_folder(fullname, newfullname)
+            if b'NO' in res or b'BAD' in res:
+                raise errors.serverFail(res.encode())
+
+        if isSubscribed is not None and isSubscribed != mailbox['isSubscribed']:
+            if isSubscribed:
+                res = self.imap.subscribe_folder(fullname)
             else:
-                prefix = self.dgetfield('iserver', {}, 'imapPrefix') or ''
-                namemap = [old['imapname']] = (prefix + encname, jid, old['ifolderid'])
-        
-        toupdate = {}
-        for oldname in namemap.keys():
-            imapname, jid, ifolderid = namemap[oldname]
-            if imapname == oldname:
-                changed[jid] = None
-                continue
-            res = self.imap.rename_mailbox(oldname, imapname)
-            if res[1] == 'ok':
-                changed[jid] = None
-                toupdate[jid] = (imapname, ifolderid)
-            else:
-                notchanged[jid] = {'type': 'serverError', 'description': res[2]}
+                res = self.imap.unsubscribe_folder(fullname)
+            if b'NO' in res or b'BAD' in res:
+                raise errors.serverFail(res.encode())
 
-        for jid in toupdate.keys():
-            impaname, ifolderid = toupdate[jid]
-            change = update[jid]
-            self.dmaybeupdate('ifolders', {'imapname': imapname}, {'ifolderid': ifolderid})
-            changes = {}
-            if 'name' in change:
-                changes['name'] = change['name']
-            if 'parentId' in change:
-                changes['parentId'] = change['parentId']
-            if 'sortOrder' in change:
-                changes['sortOrder'] = change['sortOrder']
-            self.dmaybedirty('jmailboxes', changes, {'jmailboxid': jid})
-        self.commit()
-        return changed, notchanged
+        if sortOrder is not None and sortOrder != mailbox['sortOrder']:
+            # TODO: update in persistent storage
+            mailbox['sortOrder'] = sortOrder
+        self.sync_mailboxes()
 
-    def destroy_mailboxes(self, destroy, destroyMessages):
-        if not destroy:
-            return [], {}
-        
-        destroyed = []
-        notdestroyed = {}
-        namemap = {}
-        for jid in destroy:
-            old = self.dgetone('ifolders', {'jmailboxid': jid}, 'imapname,ifolderid')
-            if old:
-                if not destroyMessages:
-                    # check if empty
-                    if self.dcount('imessages', {'ifolderid', old['ifolderid']}):
-                        notdestroyed[jid] = {'type': 'mailboxHasEmail'}
-                        continue
-                namemap[old['imapname']] = (jid, old['ifolderid'])
-            else:
-                notdestroyed[jid] = {'type': 'invalidProperties', 'description': 'parent folder not found'}
-        
-        # we reverse so we delete children before parents
-        toremove = {}
-        for oldname in reversed(sorted(namemap.keys())):
-            jid, ifolderid = namemap[oldname]
-            res = self.imap.delete_mailbox(oldname)
-            if res[1] == 'ok':
-                destroyed.append(jid)
-                toremove[jid] = ifolderid
-            else:
-                notdestroyed[jid] = {'type': 'serverError', 'description': res[2]}
-        
-        if toremove:
-            for jid in sorted(toremove.keys()):
-                ifolderid = toremove[jid]
-                self.ddelete('ifolders', {'ifolderid', ifolderid})
-                self.ddupdate('jmailboxes', {'active': 0}, {'jmailboxid': jid})
-            self.commit()
 
-        return destroyed, notdestroyed
+    def destroy_mailbox(self, id):
+        mailbox = self.mailboxes.get(id, None)
+        if not mailbox:
+            raise errors.notFound('mailbox not found')
+        fullname = self.mailbox_fullname(mailbox['parentId'], mailbox['name'])
+        res = self.imap.delete_folder(fullname)
+        if b'NO' in res or b'BAD' in res:
+            raise errors.serverFail(res.encode())
+        mailbox['deleted'] = datetime.now().timestamp()
+        self.sync_mailboxes()
+
 
     def create_submission(self, new, idmap):
         if not new:
@@ -865,7 +747,7 @@ class ImapDB(BaseDB):
             if not msgid:
                 notcreated[cid] = {'error': 'nos msgid provided'}
                 continue
-            thrid = self.dgetfield('jmessages', {'msgid': msgid, 'active': 1}, 'thrid')
+            thrid = self.dgetfield('jmessages', {'msgid': msgid, 'deleted': 0}, 'thrid')
             if not thrid:
                 notcreated[cid] = {'error': 'message does not exist'}
                 continue
@@ -885,8 +767,10 @@ class ImapDB(BaseDB):
 
         return createmap, notcreated
 
+
     def update_submission(self, changed, idmap):
         return {}, {x: 'change not supported' for x in changed.keys()}
+
 
     def destroy_submission(self, destroy):
         if not destroy:
@@ -895,8 +779,8 @@ class ImapDB(BaseDB):
         notdestroyed = {}
         namemap = {}
         for subid in destroy:
-            active = self.dgetfield('jsubmission', {'jsubid': subid}, 'active')
-            if active:
+            deleted = self.dgetfield('jsubmission', {'jsubid': subid}, 'deleted')
+            if deleted:
                 destroy.append(subid)
                 self.ddelete('jsubmission', {'jsubid': subid})
             else:
@@ -906,23 +790,6 @@ class ImapDB(BaseDB):
     
     def _initdb(self):
         super()._initdb()
-        # XXX - password encryption?
-        self.dbh.execute("""
-            CREATE TABLE IF NOT EXISTS iserver (
-            username TEXT PRIMARY KEY,
-            password TEXT,
-            imapHost TEXT,
-            imapPort INTEGER,
-            imapSSL INTEGER,
-            imapPrefix TEXT,
-            smtpHost TEXT,
-            smtpPort INTEGER,
-            smtpSSL INTEGER,
-            caldavURL TEXT,
-            carddavURL TEXT,
-            lastfoldersync DATE,
-            mtime DATE NOT NULL
-            )""" )
 
         self.dbh.execute("""
             CREATE TABLE IF NOT EXISTS ifolders (
@@ -938,10 +805,8 @@ class ImapDB(BaseDB):
             uniqueid TEXT,
             mtime DATE NOT NULL
             )""")
-
         self.dbh.execute("CREATE INDEX IF NOT EXISTS ifolderj ON ifolders (jmailboxid)");
         self.dbh.execute("CREATE INDEX IF NOT EXISTS ifolderlabel ON ifolders (label)");
-
 
         self.dbh.execute("""
             CREATE TABLE IF NOT EXISTS imessages (
@@ -959,22 +824,85 @@ class ImapDB(BaseDB):
             size INTEGER,
             mtime DATE NOT NULL
             )""")
-
         self.dbh.execute("CREATE UNIQUE INDEX IF NOT EXISTS imsgfrom ON imessages (ifolderid, uid)");
         self.dbh.execute("CREATE INDEX IF NOT EXISTS imessageid ON imessages (msgid)");
         self.dbh.execute("CREATE INDEX IF NOT EXISTS imessagethrid ON imessages (thrid)");
 
-        # not used for Gmail, but it doesn't hurt to have it
         self.dbh.execute("""
             CREATE TABLE IF NOT EXISTS ithread (
             messageid TEXT PRIMARY KEY,
             sortsubject TEXT,
             thrid TEXT
             )""")
-
         self.dbh.execute("CREATE INDEX IF NOT EXISTS ithrid ON ithread (thrid)");
 
         self.dbh.execute("CREATE TABLE IF NOT EXISTS imsgidtodo (msgid TEXT PRIMARY KEY NOT NULL)");
+
+
+def as_imap_sort(sort):
+    criteria = []
+    for crit in sort:
+        for prop, field in [
+                ('sentAt', 'DATE'),
+                ('size', 'SIZE'),
+                ('subject', 'SUBJECT'),
+                ('from', 'FROM'),
+                ('to', 'TO'),
+                ('cc', 'CC'),
+            ]:
+            if crit['property'] == prop:
+                if crit['isAscending']:
+                    criteria.append('REVERSE')
+                criteria.append(field)
+    return criteria
+
+
+def as_imap_search(filter):
+    operator = filter.get('operator', None)
+    if operator:
+        conds = filter['conds']
+        if operator == 'NOT':  # NOR
+            return ['NOT', [as_imap_search(c) for c in conds]]
+        elif operator == 'OR':
+            if len(conds) == 1:
+                return as_imap_search(conds[0])
+            elif len(conds) == 2:
+                return ['OR', as_imap_search(conds[0]), as_imap_search(conds[1])]
+            elif len(conds) > 2:
+                return [
+                    'OR',
+                    as_imap_search(conds[0]),
+                    as_imap_search({'operator': 'OR', 'conditions': conds[1:]})
+                ]
+            raise errors.unsupportedFilter(f"Empty conditions")
+        elif operator == 'AND':
+            return [as_imap_search(c) for c in conds]
+        raise errors.unsupportedFilter(f"Invalid operator {operator}")
+
+    criteria = []
+
+    if 'header' in filter:
+        criteria.extend(filter['header'])
+
+    for field in ('before','after','text','from','to','cc','bcc','subject','body'):
+        if field in filter:
+            criteria.append(field)
+            criteria.append(filter[field])
+    for cond, crit in [
+            ('minSize', 'NOT SMALLER'),
+            ('maxSize', 'NOT LARGER'),
+            ('hasKeyword', 'KEYWORD'),
+            ('notKeyword', 'UNKEYWORD'),
+        ]:
+        if cond in filter:
+            criteria.append(crit)
+            criteria.append(filter[cond])
+    return criteria
+
+
+def as_imap_fields(fields):
+    # TODO: map to imap names
+    return fields
 
 def find_type(message, part):
     if message.get('id', '') == part:
@@ -994,7 +922,8 @@ def _normalsubject(subject):
     sub = re.sub(r'^[ \t]*\\[[^]]+\\]', subject, '')
     # any old whitespace
     sub = re.sub(r'[ \t\r\n]+', subject, '')
-    
+
+
 def _envelopedata(data):
     envelope = json.loads(data)
     print('envelope:', envelope)
