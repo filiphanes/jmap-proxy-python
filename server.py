@@ -45,7 +45,7 @@ async def event_stream(request, types, closeafter, ping):
         if await request.is_disconnected():
             break
         if ping:
-            yield f'event: ping\ndata: {"interval":{ping}}\n\n'
+            yield 'event: ping\ndata: {"interval":%d}\n\n' % ping
         await asyncio.sleep(ping or 10)
 
 async def event(request):
@@ -62,7 +62,7 @@ async def event(request):
     try:
         ping = int(request.query_params['ping'])
     except (KeyError, ValueError):
-        ping = 0
+        ping = 5
         # return Response('ping param required', status_code=400)
 
     return StreamingResponse(
@@ -96,7 +96,7 @@ async def well_known_jmap(request):
         "apiUrl": BASEURL + "/api/",
         "downloadUrl": BASEURL + "/download/{accountId}/{blobId}/{name}?type={type}",
         "uploadUrl": BASEURL + "/upload/{accountId}/",
-        "eventSourceUrl": BASEURL + "/event/?types={types}&closeafter={closeafter}&ping={ping}",
+        "eventSourceUrl": BASEURL + "/event/"#?types={types}&closeafter={closeafter}&ping={ping}",
     }
     return JSONResponse(res)
 

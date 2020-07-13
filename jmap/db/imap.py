@@ -1,23 +1,25 @@
-import hashlib
+from binascii import a2b_base64, b2a_base64
 from collections import defaultdict
-import re
 from datetime import datetime
+import email
+from email.policy import default
+import hashlib
+import re
 import uuid
+
 try:
     import orjson as json
 except ImportError:
     import json
-
 from imapclient import IMAPClient
 from imapclient.exceptions import IMAPClientError
 from imapclient.response_types import Envelope
+
 from jmap import errors, parse
+from jmap.parse import asAddresses, asDate, asMessageIds, asText, bodystructure, htmltotext, parseStructure
 
 from .base import BaseDB
-from email.header import decode_header, make_header
 
-
-TAG = 1
 
 KNOWN_SPECIALS = set(b'\\HasChildren \\HasNoChildren \\NoSelect \\NoInferiors \\UnMarked'.lower().split())
 
@@ -61,8 +63,170 @@ KEYWORD2FLAG = {
     '$draft': '\\Draft',
     '$seen': '\\Seen',
 }
-FLAG2KEYWORD = {f.lower(): kw for kw, f in KEYWORD2FLAG.items()}
+FLAG2KEYWORD = {f.lower().encode(): kw for kw, f in KEYWORD2FLAG.items()}
 
+
+FIELDS_MAP = {
+    'blobId': 'X-GUID',  # Dovecot
+    # 'blobId': 'MESSAGEID',  # IMAP extension OBJECTID
+    'hasAttachment': 'FLAGS',
+    'headers': 'RFC822.HEADER',
+    'keywords': 'FLAGS',
+    'preview': 'PREVIEW',
+    'receivedAt': 'INTERNALDATE',
+    'size': 'RFC822.SIZE',
+    'attachments': 'RFC822',
+    'bodyStructure': 'RFC822',
+    'bodyValues': 'RFC822',
+    'textBody': 'RFC822',
+    'htmlBody': 'RFC822',
+    'subject': 'RFC822.HEADER',
+    'from': 'RFC822.HEADER',
+    'to': 'RFC822.HEADER',
+    'cc': 'RFC822.HEADER',
+    'bcc': 'RFC822.HEADER',
+    'replyTo': 'RFC822.HEADER',
+    'inReplyTo': 'RFC822.HEADER',
+    'sentAt': 'RFC822.HEADER',
+    'references': 'RFC822.HEADER',
+}
+
+class ImapMessage(dict):
+    header_re = re.compile(r'^([\w-]+)\s*:\s*(.+?)\r\n(?=[\w\r])', re.I | re.M | re.DOTALL)
+
+    def __missing__(self, key):
+        self[key] = getattr(self, key)()
+        return self[key]
+
+    def get_header(self, name: str):
+        "Return raw value from last header instance, name needs to be lowercase."
+        return self['LASTHEADERS'].get(name, None)
+
+    def EML(self):
+        return email.message_from_bytes(self['RFC822'], policy=default)
+
+    def LASTHEADERS(self):
+        # make headers dict with only last instance of each header
+        # as required by JMAP spec for single header get
+        return {name.lower(): raw
+            for name, raw in self.header_re.findall(self['DECODEDHEADERS'])}
+
+    def DECODEDHEADERS(self):
+        try:
+            return self.pop('RFC822.HEADER').decode()
+        except KeyError:
+            match = re.search(rb'\r\n\r\n', self['RFC822'])
+            if match:
+                return self['RFC822'][:match.end()].decode()
+
+
+    def blobId(self):
+        return self['X-GUID'].decode()
+
+    def hasAttachment(self):
+        # Dovecot with mail_attachment_detection_options = add-flags-on-save
+        return '$HasAttachment' in self['keywords']
+
+    def headers(self):
+        return [{'name': name, 'value': value}
+            for name, value in self.header_re.findall(self['DECODEDHEADERS'])]
+
+    def inReplyTo(self):
+        return asMessageIds(self.get_header('in-reply-to'))
+
+    def keywords(self):
+        return {FLAG2KEYWORD.get(f.lower(), f.decode()): True for f in self.pop('FLAGS')}
+
+    def messageId(self):
+        return asMessageIds(self.get_header('message-id'))
+
+    def mailboxIds(self):
+        return [ parse_message_id(self['id'])[0] ]
+
+    def preview(self):
+        return self.pop('PREVIEW')[1].decode()
+
+    def receivedAt(self):
+        return self.pop('INTERNALDATE')
+
+    def references(self):
+        return asMessageIds(self.get_header('references'))
+
+    def replyTo(self):
+        return asAddresses(self.get_header('reply-to'))
+
+    def sentAt(self):
+        return asDate(self.get_header('date'))
+
+    def size(self):
+        try:
+            return self.pop('RFC822.SIZE')
+        except AttributeError:
+            return len(self['RFC822'])
+
+    def subject(self):
+        return asText(self.get_header('subject')) or ''
+
+    def threadId(self):
+        # TODO: threading
+        return f"t{self['id']}"
+
+    def bodyStructure(self):
+        self['bodyValues'], bodyStructure \
+            = bodystructure(self['id'], self['EML'])
+        return bodyStructure
+
+    def bodyValues(self):
+        bodyValues, self['bodystructure'] \
+            = bodystructure(self['id'], self['EML'])
+        return bodyValues
+
+    def textBody(self):
+        textBody, self['htmlBody'], self['attachments'] \
+            = parseStructure([self['bodyStructure']], 'mixed', False)
+        return textBody
+
+    def htmlBody(self):
+        self['textBody'], htmlBody, self['attachments'] \
+            = parseStructure([self['bodyStructure']], 'mixed', False)
+        return htmlBody
+
+    def attachments(self):
+        self['textBody'], self['htmlBody'], attachments \
+            = parseStructure([self['bodyStructure']], 'mixed', False)
+        return attachments
+
+
+# Define address getters
+# "from" is reserved in python, it needs to be defined this way
+# others are similar
+def address_getter(field):
+    def get(self):
+        return asAddresses(self.get_header(field)) or []
+    return get
+for prop in ('from', 'to', 'cc', 'bcc', 'sender'):
+    setattr(ImapMessage, prop, address_getter(prop))
+
+
+# def format_message_id(mailboxid, uid):
+#     return f'{mailboxid}_{uid}'
+
+# def parse_message_id(messageid):
+#     return messageid.split('_')
+
+def format_message_id(mailboxid, uidvalidity, uid):
+    return b2a_base64(
+        bytes.fromhex(mailboxid) +
+        uidvalidity.to_bytes(4, 'big') + 
+        uid.to_bytes(4, 'big'),
+        newline=False
+    ).replace(b'+', b'-').replace(b'/', b'_').decode()
+
+def parse_message_id(messageid):
+    b = a2b_base64(messageid.encode().replace(b'-', b'+').replace(b'_', b'/'))
+    return b[:16].hex(), \
+           int.from_bytes(b[16:20], 'big'), \
+           int.from_bytes(b[20:24], 'big')
 
 class ImapDB(BaseDB):
     def __init__(self, username, password='h', host='localhost', port=143, *args, **kwargs):
@@ -85,232 +249,123 @@ class ImapDB(BaseDB):
             self.highModSeqThread = 1
             self.highModSeqEmail = 1
 
+        # (imapname, readonly)
+        self.selected_folder = (None, False)
         self.mailboxes = {}
         self.sync_mailboxes()
+        self.messages = {}
 
 
-    def get_messages(self, fields=(), sort={}, inMailbox=None, id__in=(), **filter):
-        if inMailbox is None:
-            # TODO: implement optional inMailbox
-            raise errors.invalidArguments('This JMAP implementation requires inMailbox filter')
+    def get_messages_cached(self, properties=(), id__in=()):
+        messages = []
+        if not self.messages:
+            return messages, id__in, properties
+        fetch_props = set()
+        fetch_ids = set(id__in)
+        for id in id__in:
+            msg = self.messages.get(id, None)
+            if msg:
+                found = True
+                for prop in properties:
+                    try:
+                        msg[prop]
+                    except (KeyError, AttributeError):
+                        found = False
+                        fetch_props.add(prop)
+                if found:
+                    fetch_ids.remove(id)
+                    messages.append(msg)
+        # if one messages is missing, need to fetch all properties
+        if len(messages) < len(id__in):
+            fetch_props = properties
+        return messages, fetch_ids, fetch_props
 
-        mailbox = self.mailboxes.get(inMailbox, None)
-        if not mailbox:
-            raise errors.notFound(f'Mailbox {inMailbox} not found')
-        fullname = self.mailbox_fullname(mailbox['parentId'], mailbox['name'])
-        self.imap.select_folder(fullname, readonly=True)
 
-        if id__in:
-            uids = [int(id.split('_')[1]) for id in id__in]
+    def get_messages(self, properties=(), sort={}, inMailbox=None, inMailboxOtherThan=(), id__in=None, threadId__in=None, **criteria):
+        # XXX: id == threadId for now
+        if id__in is None and threadId__in is not None:
+            id__in = [id[1:] for id in threadId__in]
+        if id__in is None:
+            messages = []
         else:
-            search_criteria = as_imap_search(filter) or 'ALL'
-            if sort:
-                sort_criteria = as_imap_sort(sort) or None
-                uids = self.imap.sort(sort_criteria, search_criteria)
-            else:
-                uids = self.imap.search(search_criteria)
+            # try get everything from cache
+            messages, id__in, properties = self.get_messages_cached(properties, id__in=id__in)
 
-        if fields == 'id':
-            return [f"{inMailbox}_{uid}" for uid in uids]
+        fetch_fields = {f for prop, f in FIELDS_MAP.items() if prop in properties}
+        if 'RFC822' in fetch_fields:
+            # remove redundand fields
+            fetch_fields.discard('RFC822.HEADER')
+            fetch_fields.discard('RFC822.SIZE')
 
-        messages = {}
-        res = self.imap.fetch(uids, as_imap_fields(fields.split(',')))
-        for uid, msg in res.items():
-            # TODO
-            messages[uid] = msg
+        if inMailbox:
+            mailbox = self.mailboxes.get(inMailbox, None)
+            if not mailbox:
+                raise errors.notFound(f'Mailbox {inMailbox} not found')
+            mailboxes = [mailbox]
+        elif inMailboxOtherThan:
+            mailboxes = [m for m in self.mailboxes.values() if m['id'] not in inMailboxOtherThan]
+        else:
+            mailboxes = self.mailboxes.values()
+
+        search_criteria = as_imap_search(criteria)
+        sort_criteria = as_imap_sort(sort) or '' if sort else None
+
+        mailbox_uids = {}
+        if id__in is not None:
+            if len(id__in) == 0:
+                return messages  # no messages matches empty ids
+            if not fetch_fields and not sort_criteria:
+                # when we don't need anything new from IMAP, create empty messages
+                # useful when requested conditions can be calculated from id (threadId)
+                messages.extend(self.messages.get(id, 0) or ImapMessage(id=id) for id in id__in)
+                return messages
+            
+            for id in id__in:
+                # TODO: check uidvalidity
+                mailboxid, uidvalidity, uid = parse_message_id(id)
+                uids = mailbox_uids.get(mailboxid, [])
+                if not uids:
+                    mailbox_uids[mailboxid] = uids
+                uids.append(uid)
+            # filter out unnecessary mailboxes
+            mailboxes = [m for m in mailboxes if m['id'] in mailbox_uids]
+
+        for mailbox in mailboxes:
+            imapname = mailbox['imapname']
+            if self.selected_folder[0] != imapname:
+                self.imap.select_folder(imapname, readonly=True)
+                self.selected_folder = (imapname, True)
+
+            uids = mailbox_uids.get(mailbox['id'], None)
+            # uids are now None or not empty
+            # fetch all
+            if sort_criteria:
+                if uids:
+                    search = f'{",".join(map(str, uids))} {search_criteria}'
+                else:
+                    search = search_criteria or 'ALL'
+                uids = self.imap.sort(sort_criteria, search)
+            elif search_criteria:
+                if uids:
+                    search = f'{",".join(map(str, uids))} {search_criteria}'
+                uids = self.imap.search(search)
+            if uids is None:
+                uids = '1:*'
+            fetch_fields.add('UID')
+            fetches = self.imap.fetch(uids, fetch_fields)
+
+            for uid, data in fetches.items():
+                id = format_message_id(mailbox['id'], mailbox['uidvalidity'], uid)
+                msg = self.messages.get(id, None)
+                if not msg:
+                    msg = ImapMessage(id=id, mailboxIds=[mailbox['id']])
+                    self.messages[id] = msg
+                for k, v in data.items():
+                    msg[k.decode()] = v
+                messages.append(msg)
         return messages
-
-
-    def labels(self):
-        self.cursor.execute('SELECT label,ifolderid,jmailboxid,imapname FROM ifolders')
-        return {label: (ifolderid, jmailboxid, imapname) for label, ifolderid, jmailboxid, imapname in self.cursor}
     
-    def backfill(self):
-        rest = 500
-        self.cursor.execute('SELECT ifolderid, label FROM ifolders'
-                            ' WHERE uidnext > 1 AND uidfirst > 1')
-        rows = self.cursor.fetchall()
 
-        if rows:
-            for ifolderid, label in rows:
-                rest -= self.do_folder(ifolderid, label, rest)
-                if rest < 10:
-                    break
-            self.sync_jmap()
-            return 1
-    
-    def firstsync(self):
-        self.sync_folders()
-        self.cursor.execute('SELECT ifolderid, label FROM ifolders'
-                            ' WHERE UPPER(imapname) = "INBOX" LIMIT 1')
-        for ifolderid, label in self.cursor.fetchall():
-            self.do_folder(ifolderid, label, 10000)
-        self.sync_jmap()
-        
-    def calcmsgid(self, imapname, uid, msg):
-        envelope = msg[b'ENVELOPE']
-        # print("msg[b'ENVELOPE']=", msg[b'ENVELOPE'])
-        coded = json.dumps([envelope], default=jsonDefault)
-        base = hashlib.sha1(coded).hexdigest()[:9]
-        msgid = 'm' + base
-        in_reply_to = envelope.in_reply_to
-        messageid = envelope.message_id
-        encsub = envelope.subject
-        try:
-            encsub = str(make_header(decode_header(encsub)))
-        except Exception:
-            pass
-        sortsub = _normalsubject(encsub)
-        self.cursor.execute('SELECT DISTINCT thrid FROM ithread'
-               ' WHERE messageid IN (?,?) AND sortsubject=? LIMIT 1',
-               (in_reply_to, messageid, sortsub))
-        try:
-            thrid, = self.cursor.fetchone()
-        except Exception:
-            thrid = 't' + base
-        for id in (in_reply_to, messageid):
-            if id:
-                self.dbh.execute('INSERT OR IGNORE INTO ithread (messageid, thrid, sortsubject) VALUES (?,?,?)', (id, thrid, sortsub))
-        return msgid, thrid
-    
-    def do_folder(self, ifolderid, forcelabel, batchsize=0):
-        self.cursor.execute("SELECT imapname, uidfirst, uidnext, uidvalidity, highestmodseq FROM ifolders WHERE ifolderid=?", [ifolderid])
-        data = self.cursor.fetchone()
-        if not data:
-            return print(f'NO SUCH FOLDER {ifolderid}')
-
-        imapname, uidfirst, uidnext, uidvalidity, highestmodseq = data
-        uidfirst = uidfirst or 1
-        highestmodseq = 1 # comment in production
-        fetch_data = 'UID FLAGS INTERNALDATE ENVELOPE RFC822.SIZE'.split()
-        fetch_modifiers = (f'CHANGEDSINCE {highestmodseq}',)
-
-        oldstate = {
-            'uidvalidity': uidvalidity,
-            'highestmodseq': highestmodseq,
-            'uidnext': uidnext,
-        }
-
-        res = self.imap.select_folder(imapname, readonly=True)
-        exists = int(res[b'EXISTS'])
-        uidvalidity = int(res[b'UIDVALIDITY'])
-        uidnext = int(res[b'UIDNEXT'])
-        highestmodseq = int(res[b'HIGHESTMODSEQ'])
-        
-        newstate = {
-            'uidvalidity': uidvalidity,
-            'highestmodseq': highestmodseq,
-            'uidnext': uidnext,
-            'exists': exists,
-        }
-
-        if not batchsize:
-            new = self.imap.fetch((oldstate['uidnext'], '*'), fetch_data, fetch_modifiers)
-            update = self.imap.fetch((uidfirst, oldstate['uidnext']-1), ('UID', 'FLAGS'))
-            backfill = {}
-        elif uidfirst > 1:
-            end = uidfirst - 1
-            uidfirst = max(uidfirst - batchsize, 1)
-            new = {}
-            update = {}
-            self.backfilling = True
-            backfill = self.imap.fetch(f'{uidfirst}:{end}', fetch_data, fetch_modifiers)
-        else:
-            return
-        print('fetch_data:', fetch_data)
-        print('new:', new)
-        print('update:', update)
-        print('backfill:', backfill)
-
-        if oldstate['uidvalidity'] != uidvalidity:
-            raise Exception(f"UIDVALIDITY CHANGED {imapname}: {oldstate['uidvalidity']} => {uidvalidity}")
-
-        if newstate['uidvalidity'] != uidvalidity:
-            # going to want to nuke everything for the existing folder and create this  - but for now, just die
-            raise Exception(f"UIDVALIDITY CHANGED {imapname}: {uidvalidity} => {newstate['uidvalidity']}")
-        
-
-        self.begin()
-        didold = 0
-        for uid, msg in backfill.items():
-            msgid, thrid = self.calcmsgid(imapname, uid, msg)
-            didold += 1
-            self.new_record(
-                ifolderid,
-                uid,
-                (f.decode() for f in msg[b'FLAGS'] if f.lower() != b'\\recent'),
-                [forcelabel],
-                msg[b'ENVELOPE'],
-                msg[b'INTERNALDATE'],
-                msgid,
-                thrid,
-                msg[b'RFC822.SIZE'],
-            )
-        
-        for uid, msg in update.items():
-            print('msg:', msg)
-            self.changed_record(
-                ifolderid,
-                uid,
-                (f.decode() for f in msg[b'FLAGS'] if f.lower() != b'\\recent'),
-                [forcelabel],
-            )
-
-        for uid, msg in new.items():
-            msgid, thrid = self.calcmsgid(imapname, uid, msg)
-            self.new_record(
-                ifolderid,
-                uid,
-                (f.decode() for f in msg[b'FLAGS'] if f.lower() != b'\\recent'),
-                [forcelabel],
-                msg[b'ENVELOPE'],
-                msg[b'INTERNALDATE'],
-                msgid,
-                thrid,
-                msg[b'RFC822.SIZE'],
-            )
-
-        self.dupdate('ifolders', {
-            'highestmodseq': newstate['highestmodseq'],
-            'uidfirst': uidfirst,
-            'uidnext': newstate['uidnext'],
-        }, {'ifolderid': ifolderid})
-        self.commit()
-
-        if batchsize:
-            return didold
-        self.cursor.execute('SELECT COUNT(*) FROM imessages WHERE ifolderid=?', [ifolderid])
-        count, = self.cursor.fetchone()
-
-        if uidfirst != 1 or count != newstate['exists']:
-            # welcome to the future
-            uidnext = newstate['uidnext']
-            to = uidnext - 1
-            exists = self.imap.search(['UID', f'{uidfirst}:{to}'])
-            exists = set(exists)
-            self.cursor.execute('SELECT msgid, uid FROM imessages WHERE ifolderid = ? AND uid >= ? AND uid <= ?', [ifolderid, uidfirst, to])
-            for msgid, uid in self.cursor:
-                if uid not in exists:
-                    self.ddelete('imessages', {'ifolderid': ifolderid, 'uid': uid})
-                    self.mark_sync(msgid)
-            self.commit()
-    
-    def imap_search(self, *search):
-        matches = set()
-        for folder in self.dget('ifolders'):
-            frm = folder['uidfirst']
-            to = folder['uidnext'] - 1
-            res = self.imap.search(folder['imapname'], 'uid', f'{frm}:{to}', search)
-            if not res[2] == folder['uidvalidity']:
-                continue
-            uids = (str(uid) for uid in res[3])
-            self.cursor.execute("SELECT msgid FROM imessages WHERE ifolderid=? AND uid IN (" + ','.join(uids) + ")", [folder['ifolderid']])
-            matches.update([msgid for msgid, in self.cursor])
-        return matches
-
-    def mark_sync(self, msgid):
-        self.dbh.execute('INSERT OR IGNORE INTO imsgidtodo (msgid) VALUES (?)', [msgid])
-    
     def changed_record(self, ifolderid, uid, flags=(), labels=()):
         res = self.dmaybeupdate('imessages', {
             'flags': json.dumps(sorted(flags)),
@@ -396,7 +451,9 @@ class ImapDB(BaseDB):
                     # TODO: merge similar actions?
                     imapname = foldermap[ifolderid]['imapname']
                     uidvalidity = foldermap[ifolderid]['uidvalidity']
-                    self.imap.select_folder(imapname)
+                    if self.selected_folder != (imapname, False):
+                        self.imap.select_folder(imapname)
+                        self.selected_folder = (imapname, False)
                     if imapname and uidvalidity and 'keywords' in action:
                         flags = set(action['keywords'])
                         for kw in flags:
@@ -478,116 +535,6 @@ class ImapDB(BaseDB):
         if msgid:
             self.ddelete('imessages', {'ifolderid': ifolderid, 'uid': uid})
             self.mark_sync(msgid)
-    
-    def new_record(self, ifolderid, uid, flags, labels, envelope, internaldate, msgid, thrid, size):
-        self.dinsert('imessages', {
-            'ifolderid': ifolderid,
-            'uid': uid,
-            'flags': json.dumps(sorted(flags)),
-            'labels': json.dumps(sorted(labels)),
-            'internaldate': internaldate.isoformat(),
-            'msgid': msgid,
-            'thrid': thrid,
-            'envelope': json.dumps(envelope, default=jsonDefault),
-            'size': size,
-        })
-        self.mark_sync(msgid)
-    
-    def sync_jmap_msgid(self, msgid):
-        labels = set()
-        flags = set()
-        self.cursor.execute('SELECT flags,labels FROM imessages WHERE msgid=?', [msgid])
-        for f, l in self.cursor:
-            print('flags:', f, 'labels:', l)
-            flags.update(json.loads(f))
-            labels.update(json.loads(l))
-
-        keywords = {}
-        for flag in flags:
-            flag = flag.lower()
-            keywords[FLAG2KEYWORD.get(flag, flag)] = True
-        
-        slabels = self.labels()
-        print('labels', labels)
-        jmailboxids = [slabels[l][1] for l in labels]
-
-        if not jmailboxids:
-            return self.delete_message(msgid)
-        self.cursor.execute("SELECT msgid FROM jmessages WHERE msgid=? AND deleted=NULL", [msgid])
-        if self.cursor.fetchone():
-            return self.change_message(msgid, {'keywords': keywords}, jmailboxids)
-        else:
-            self.cursor.execute("SELECT thrid,internaldate,size,envelope FROM imessages WHERE msgid=?", [msgid])
-            msg = self.cursor.fetchone()
-            return self.add_message({
-                'msgid': msgid,
-                'receivedAt': msg['internaldate'],
-                'thrid': msg['thrid'],
-                'size': msg['size'],
-                'keywords': keywords,
-                'isDraft': '$draft' in keywords,
-                'isUnread': '$seen' not in keywords,
-                **_envelopedata(msg['envelope']),
-            }, jmailboxids)
-
-    def sync_jmap(self):
-        self.cursor.execute('SELECT msgid FROM imsgidtodo')
-        msgids = [i for i, in self.cursor]
-        for msgid in msgids:
-            self.sync_jmap_msgid(msgid)
-            self.cursor.execute('DELETE FROM imsgidtodo WHERE msgid=?', [msgid])
-        if msgids:
-            self.commit()
-
-
-    def fill_messages(self, ids):
-        if not ids:
-            return
-        self.cursor.execute('SELECT msgid, parsed FROM jrawmessage'
-            ' WHERE msgid IN (' + ('?,' * len(ids))[:-1] + ')', ids)
-        
-        result = {msgid: json.loads(parsed) for msgid, parsed in self.cursor}
-        need = [i for i in ids if i not in result]
-        udata = defaultdict(dict)
-        if need:
-            self.cursor.execute('SELECT ifolderid, uid, msgid FROM imessages WHERE msgid IN (' + ('?,' * len(need))[:-1] + ')',
-                need)
-            for ifolderid, uid, msgid in self.cursor:
-                udata[ifolderid][uid] = msgid
-        
-        foldermap = {}
-        for ifolderid, uhash in udata.items():
-            for msgid in uhash.values():
-                if msgid not in result:
-                    foldermap[ifolderid] = self.dgetone('ifolders', {'ifolderid': ifolderid}, 'imapname,uidvalidity')
-                    break
-
-        if not udata:
-            return result
-        
-        for ifolderid, uhash in udata.items():
-            if ifolderid not in foldermap: continue
-            uids = ','.join(str(u) for u,i in uhash.items() if i not in result)
-            if not uids: continue
-            imapname, uidvalidity = foldermap[ifolderid]
-            res = self.imap.select_folder(imapname, readonly=True)
-            if res[b'UIDVALIDITY'] != uidvalidity:
-                raise Warning('UIDVALIDITY dont matches for ' + imapname)
-            res = self.imap.fetch(uids, ['RFC822'])
-            for uid, data in res.items():
-                msgid = uhash[uid]
-                result[msgid] = parse.parse(data[b'RFC822'])
-                self.cursor.execute("INSERT OR REPLACE INTO jrawmessage (msgid,parsed,hasAttachment) VALUES (?,?,?)", [
-                    msgid,
-                    json.dumps(result[msgid]),
-                    result[msgid].get('hasAttachment', 0),
-                    ])
-        self.commit()
-
-        # XXX - handle not getting data that we need?
-        # stillneed = ids.difference(result.keys())
-        return result
-
 
     def get_raw_message(self, msgid, part=None):
         self.cursor.execute('SELECT imapname,uidvalidity,uid FROM ifolders JOIN imessages USING (ifolderid) WHERE msgid=?', [msgid])
@@ -603,21 +550,21 @@ class ImapDB(BaseDB):
         res = self.imap.getpart(imapname, uidvalidity, uid, part)
         return typ, res['data']
     
-    def get_mailboxes(self, fields=None, **filter):
-        byfullname = {}
+    def get_mailboxes(self, fields=None, **criteria):
+        byimapname = {}
         # TODO: LIST "" % RETURN (STATUS (UNSEEN MESSAGES HIGHESTMODSEQ MAILBOXID))
-        for flags, sep, fullname in self.imap.list_folders():
-            status = self.imap.folder_status(fullname, (['MESSAGES', 'UIDVALIDITY', 'UIDNEXT', 'HIGHESTMODSEQ']))
+        for flags, sep, imapname in self.imap.list_folders():
+            status = self.imap.folder_status(imapname, (['MESSAGES', 'UIDVALIDITY', 'UIDNEXT', 'HIGHESTMODSEQ', 'X-GUID']))
             flags = [f.lower() for f in flags]
             roles = [f for f in flags if f not in KNOWN_SPECIALS]
-            label = roles[0].decode() if roles else fullname
-            role = ROLE_MAP.get(label, None)
+            label = roles[0].decode() if roles else imapname
+            role = ROLE_MAP.get(label.lower(), None)
             can_select = b'\\noselect' not in flags
-            byfullname[fullname] = {
-                # expecting uidvalidity is generated as unique timestamp by imap
-                'id': f"f{status[b'UIDVALIDITY']}",
+            byimapname[imapname] = {
+                # Dovecot can fetch X-GUID
+                'id': status[b'X-GUID'].decode(),
                 'parentId': None,
-                'name': fullname,
+                'name': imapname,
                 'role': role,
                 'sortOrder': 2 if role else (1 if role == 'inbox' else 3),
                 'isSubscribed': True,  # TODO: use LSUB
@@ -636,49 +583,48 @@ class ImapDB(BaseDB):
                     'mayDelete': False if role else True,
                     'maySubmit': can_select,
                 },
+                'imapname': imapname,
                 'sep': sep.decode(),
+                'uidvalidity': status[b'UIDVALIDITY'],
+                'uidnext': status[b'UIDNEXT'],
                 # Data sync properties
                 'createdModSeq': status[b'UIDVALIDITY'],  # TODO: persist
                 'updatedModSeq': status[b'UIDVALIDITY'],  # TODO: from persistent storage
                 'updatedNotCountsModSeq': status[b'UIDVALIDITY'],  # TODO: from persistent storage
-                'highestUID': status[b'UIDNEXT'] - 1,
                 'emailHighestModSeq': status[b'HIGHESTMODSEQ'],
                 'deleted': 0,
             }
 
         # set name and parentId for child folders
-        for fullname, mailbox in byfullname.items():
-            names = fullname.rsplit(mailbox['sep'], maxsplit=1)
+        for imapname, mailbox in byimapname.items():
+            names = imapname.rsplit(mailbox['sep'], maxsplit=1)
             if len(names) == 2:
-                mailbox['parentId'] = byfullname[names[0]]['id']
+                mailbox['parentId'] = byimapname[names[0]]['id']
                 mailbox['name'] = names[1]
 
         # update cache
-        self.mailboxes = {mbox['id']: mbox for mbox in byfullname.values()}
-        return byfullname.values()
+        self.mailboxes = {mbox['id']: mbox for mbox in byimapname.values()}
+        return byimapname.values()
 
 
     def sync_mailboxes(self):
         self.get_mailboxes()
     
 
-    def mailbox_fullname(self, parentId, name):
-        while parentId:
-            parent = self.mailboxes.get(parentId, None)
-            if not parent:
-                raise errors.notFound('parent folder not found')
-            name = parent['name'] + parent['sep'] + name
-            parentId = parent.get('parentId', None)
-        return name
+    def mailbox_imapname(self, parentId, name):
+        parent = self.mailboxes.get(parentId, None)
+        if not parent:
+            raise errors.notFound('parent folder not found')
+        return parent['imapname'] + parent['sep'] + name
 
 
     def create_mailbox(self, name=None, parentId=None, isSubscribed=True, **kwargs):
         if not name:
             raise errors.invalidProperties('name is required')
-        fullname = self.mailbox_fullname(parentId, name)
+        imapname = self.mailbox_imapname(parentId, name)
         # TODO: parse returned MAILBOXID
         try:
-            res = self.imap.create_folder(fullname)
+            res = self.imap.create_folder(imapname)
         except IMAPClientError as e:
             desc = str(e)
             if '[ALREADYEXISTS]' in desc:
@@ -687,9 +633,9 @@ class ImapDB(BaseDB):
             raise errors.serverFail(res.decode())
 
         if not isSubscribed:
-            self.imap.unsubscribe_folder(fullname)
+            self.imap.unsubscribe_folder(imapname)
 
-        status = self.imap.folder_status(fullname, ['UIDVALIDITY'])
+        status = self.imap.folder_status(imapname, ['UIDVALIDITY'])
         self.sync_mailboxes()
         return f"f{status[b'UIDVALIDITY']}"
 
@@ -698,22 +644,22 @@ class ImapDB(BaseDB):
         mailbox = self.mailboxes.get(id, None)
         if not mailbox:
             raise errors.notFound('mailbox not found')
-        fullname = self.mailbox_fullname(mailbox['parentId'], mailbox['name'])
+        imapname = mailbox['imapname']
 
         if (name is not None and name != mailbox['name']) or \
            (parentId is not None and parentId != mailbox['parentId']):
             if not name:
                 raise errors.invalidProperties('name is required')
-            newfullname = self.mailbox_fullname(parentId, name)
-            res = self.imap.rename_folder(fullname, newfullname)
+            newimapname = self.mailbox_imapname(parentId, name)
+            res = self.imap.rename_folder(imapname, newimapname)
             if b'NO' in res or b'BAD' in res:
                 raise errors.serverFail(res.encode())
 
         if isSubscribed is not None and isSubscribed != mailbox['isSubscribed']:
             if isSubscribed:
-                res = self.imap.subscribe_folder(fullname)
+                res = self.imap.subscribe_folder(imapname)
             else:
-                res = self.imap.unsubscribe_folder(fullname)
+                res = self.imap.unsubscribe_folder(imapname)
             if b'NO' in res or b'BAD' in res:
                 raise errors.serverFail(res.encode())
 
@@ -727,8 +673,7 @@ class ImapDB(BaseDB):
         mailbox = self.mailboxes.get(id, None)
         if not mailbox:
             raise errors.notFound('mailbox not found')
-        fullname = self.mailbox_fullname(mailbox['parentId'], mailbox['name'])
-        res = self.imap.delete_folder(fullname)
+        res = self.imap.delete_folder(mailbox['imapname'])
         if b'NO' in res or b'BAD' in res:
             raise errors.serverFail(res.encode())
         mailbox['deleted'] = datetime.now().timestamp()
@@ -836,73 +781,82 @@ class ImapDB(BaseDB):
             )""")
         self.dbh.execute("CREATE INDEX IF NOT EXISTS ithrid ON ithread (thrid)");
 
-        self.dbh.execute("CREATE TABLE IF NOT EXISTS imsgidtodo (msgid TEXT PRIMARY KEY NOT NULL)");
 
+SORT_MAP = {
+    'receivedAt': 'ARRIVAL',
+    'sentAt': 'DATE',
+    'size': 'SIZE',
+    'subject': 'SUBJECT',
+    'from': 'FROM',
+    'to': 'TO',
+    'cc': 'CC',
+}
 
 def as_imap_sort(sort):
     criteria = []
     for crit in sort:
-        for prop, field in [
-                ('sentAt', 'DATE'),
-                ('size', 'SIZE'),
-                ('subject', 'SUBJECT'),
-                ('from', 'FROM'),
-                ('to', 'TO'),
-                ('cc', 'CC'),
-            ]:
-            if crit['property'] == prop:
-                if crit['isAscending']:
-                    criteria.append('REVERSE')
-                criteria.append(field)
+        if not crit.get('isAscending', True):
+            criteria.append('REVERSE')
+        try:
+            criteria.append(SORT_MAP[crit['property']])
+        except KeyError:
+            raise errors.unsupportedSort(f"Property {crit['property']} is not sortable")
     return criteria
 
+SEARCH_MAP = {
+    'blobId': 'X-GUID',
+    'minSize': 'NOT SMALLER',
+    'maxSize': 'NOT LARGER',
+    'hasKeyword': 'KEYWORD',
+    'notKeyword': 'UNKEYWORD',
+    'before': 'BEFORE',
+    'after': 'AFTER',
+    'subject': 'SUBJECT',
+    'text': 'TEXT',
+    'body': 'BODY',
+    'from': 'FROM',
+    'to': 'TO',
+    'cc': 'CC',
+    'bcc': 'BCC',
+}
 
-def as_imap_search(filter):
-    operator = filter.get('operator', None)
+def as_imap_search(criteria):
+    operator = criteria.get('operator', None)
     if operator:
-        conds = filter['conds']
-        if operator == 'NOT':  # NOR
-            return ['NOT', [as_imap_search(c) for c in conds]]
-        elif operator == 'OR':
-            if len(conds) == 1:
-                return as_imap_search(conds[0])
-            elif len(conds) == 2:
-                return ['OR', as_imap_search(conds[0]), as_imap_search(conds[1])]
-            elif len(conds) > 2:
-                return [
-                    'OR',
-                    as_imap_search(conds[0]),
-                    as_imap_search({'operator': 'OR', 'conditions': conds[1:]})
-                ]
-            raise errors.unsupportedFilter(f"Empty conditions")
+        conds = criteria['conds']
+        if operator == 'NOT' or operator == 'OR':
+            if len(conds) > 0:
+                out = []
+                if operator == 'NOT':
+                    out.append('NOT')
+                for cond in conds:
+                    out.append('OR')
+                    out.append(as_imap_search(cond))
+                # OR needs 2 args, we can delete last OR
+                del out[-3]
+                return ' '.join(out)
+            else:
+                raise errors.unsupportedFilter(f"Empty filter conditions")
         elif operator == 'AND':
-            return [as_imap_search(c) for c in conds]
+            return ' '.join([as_imap_search(c) for c in conds])
         raise errors.unsupportedFilter(f"Invalid operator {operator}")
 
-    criteria = []
+    out = []
 
-    if 'header' in filter:
-        criteria.extend(filter['header'])
+    if 'header' in criteria:
+        out.append('HEADER')
+        criteria = dict(criteria)  # make a copy
+        out.extend(criteria.pop('header'))
 
-    for field in ('before','after','text','from','to','cc','bcc','subject','body'):
-        if field in filter:
-            criteria.append(field)
-            criteria.append(filter[field])
-    for cond, crit in [
-            ('minSize', 'NOT SMALLER'),
-            ('maxSize', 'NOT LARGER'),
-            ('hasKeyword', 'KEYWORD'),
-            ('notKeyword', 'UNKEYWORD'),
-        ]:
-        if cond in filter:
-            criteria.append(crit)
-            criteria.append(filter[cond])
-    return criteria
+    for crit, value in criteria.items():
+        try:
+            out.append(SEARCH_MAP[crit])
+            out.append(value)
+        except KeyError:
+            raise UserWarning(f'Filter {crit} not supported')
 
+    return ' '.join(out)
 
-def as_imap_fields(fields):
-    # TODO: map to imap names
-    return fields
 
 def find_type(message, part):
     if message.get('id', '') == part:
@@ -924,51 +878,21 @@ def _normalsubject(subject):
     sub = re.sub(r'[ \t\r\n]+', subject, '')
 
 
-def _envelopedata(data):
-    envelope = json.loads(data)
-    print('envelope:', envelope)
-    encsub = envelope.get('Subject', '')
-    try:
-        encsub = str(make_header(decode_header(encsub)))
-    except Exception:
-        pass
-    sortsub = _normalsubject(encsub)
-    return {
-        'sentAt': datetime.fromisoformat(envelope['Date']).isoformat(),
-        'subject': encsub,
-        'sortsubject': sortsub,
-        'sender': json.dumps(envelope.get('Sender', [])),
-        'from': json.dumps(envelope.get('From', [])),
-        'to': json.dumps(envelope.get('To', [])),
-        'cc': json.dumps(envelope.get('Cc', [])),
-        'bcc': json.dumps(envelope.get('Bcc', [])),
-        'replyTo': json.dumps(envelope.get('Reply-To', [])),
-        'inReplyto': envelope.get('In-Reply-To', None),
-        'messageId': envelope.get('Message-ID', None),
-    }
+# ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrstuvwxyz-_.~"
+ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+_.~"
+def base_encode(n: int, b: int = 64, a=ALPHABET):
+    if not n:
+        return a[0]
+    s = ''
+    dm = divmod  # Access to locals is faster.
+    while n:
+        n, r = dm(n, b)
+        s = a[r] + s
+    return s
 
-
-def jsonDefault(obj):
-    if isinstance(obj, Envelope):
-        envelope = {'Date': obj.date}
-        if obj.subject:
-            envelope['Subject'] = obj.subject.decode()
-        if obj.in_reply_to:
-            envelope['In-Reply-To'] = obj.in_reply_to.decode()
-        if obj.message_id:
-            envelope['Message-ID'] = obj.message_id.decode()
-        for field, attr in [
-                ('Sender', 'sender'),
-                ('Reply-To', 'reply_to'),
-                ('From', 'from_'),
-                ('To', 'to'),
-                ('Cc', 'cc'),
-                ('Bcc', 'bcc')]:
-            if getattr(obj, attr):
-                envelope[field] = [{
-                    'name': a.name and str(make_header(decode_header(a.name.decode()))),
-                    'email': (b'%s@%s' % (a.mailbox, a.host)).decode(),
-                    } for a in getattr(obj, attr)]
-        return envelope
-
-    raise TypeError
+ALPHABET_DICT = {c: v for v, c in enumerate(ALPHABET)}
+def base_decode(s:str, b:int=64, d=ALPHABET_DICT):
+    n = 0
+    for c in s:
+        n = n * b + d[c]
+    return n

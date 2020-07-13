@@ -19,6 +19,7 @@ class User(BaseUser):
         self.accounts = {
             username: ImapAccount(username, password),
         }
+        self.sessionState = '0'
 
     @property
     def is_authenticated(self) -> bool:

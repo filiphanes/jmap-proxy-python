@@ -1,4 +1,5 @@
 from jmap import errors
+from collections import defaultdict
 
 
 def register_methods(api):
@@ -7,31 +8,25 @@ def register_methods(api):
     #TODO: api.methods['Thread/queryChanges'] = api_Thread_queryChanges
 
 
-def api_Thread_get(request, accountId, ids: list):
+def api_Thread_get(request, accountId, ids: list=None):
     account = request.get_account(accountId)
-    newState = account.db.highModSeqThread
-    lst = []
-    seenids = set()
-    notFound = []
-    for id in ids:
-        thrid = request.idmap(id)
-        if thrid in seenids:
-            continue
-        seenids.add(thrid)
-        rows = account.db.get_messages('msgid', thrid=thrid, deleted=0)
-        if rows:
-            lst.append({
-                'id': thrid,
-                'emailIds': [row['msgid'] for row in rows],
-            })
-        else:
-            notFound.append(thrid)
+    threads = defaultdict(list)
+    if ids is None:
+        # get all
+        messages = account.db.get_messages('id')
+    else:
+        notFound = set(request.idmap(id) for id in ids)
+        messages = account.db.get_messages(['id'], threadId__in=notFound)
+    for msg in messages:
+        threads[msg['threadId']].append(msg['id'])
+        if ids is not None:
+            notFound.remove(msg['threadId'])
 
     return {
         'accountId': accountId,
-        'list': lst,
-        'state': newState,
-        'notFound': notFound,
+        'list': [{'id': key, 'emailIds':val} for key, val in threads.items()],
+        'state': account.db.highModSeqThread,
+        'notFound': list(notFound),
     }
 
 

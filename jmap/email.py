@@ -5,8 +5,9 @@ except ImportError:
     import json
 
 from jmap import errors
-from jmap.parse import htmltotext, asAddresses, asDate, asMessageIds, asText, asURLs
+from jmap.parse import asAddresses, asDate, asGroupedAddresses, asMessageIds, asRaw, asText, asURLs, htmltotext
 from jmap.core import resolve_patch
+import re
 
 
 def register_methods(api):
@@ -20,61 +21,86 @@ def register_methods(api):
 
 
 def api_Email_query(request, accountId, sort={}, filter={},
-                    position=None, anchor=None, anchorOffset=None, limit=10,
+                    position=None, anchor=None, anchorOffset=None, limit:int=10000,
                     collapseThreads=False, calculateTotal=False):
     account = request.get_account(accountId)
-
-    newQueryState = account.db.highModSeqEmail
-    if position is not None and anchor is not None:
-        raise errors.invalidArguments()
-    # anchor and anchorOffset must go together
-    if (anchor is None) != (anchorOffset is None):
-        raise errors.invalidArguments()
-    
     start = position or 0
-    if start < 0:
-        raise errors.invalidArguments()
-    if collapseThreads:
-        raise errors.invalidArguments('collapseThreads not supported')
-        rows = account.db.get_messages(['id','threadId'], sort=sort, deleted=0, **filter)
-        ids = [r['id'] for r in _collapse_messages(rows)]
-    else:
-        ids = account.db.get_messages('id', sort=sort, deleted=0, **filter)
+    if anchor:
+        if position is not None:
+            raise errors.invalidArguments("anchor and position can't ")
+    elif anchorOffset is not None:
+        raise errors.invalidArguments("anchorOffset need anchor")
 
+    if collapseThreads:
+        messages = account.db.get_messages(['id','threadId'], sort=sort, **filter)
+        # messages = [r['id'] for r in _collapse_messages(messages)]
+    else:
+        messages = account.db.get_messages('id', sort=sort, **filter)
 
     if anchor:
         # need to calculate position
-        for i, row in enumerate(ids):
+        for i, row in enumerate(messages):
             if row['id'] == anchor:
-                start = max(i + anchorOffset, 0)
+                start = i + (anchorOffset or 0)
+                if start < 0: start = 0
                 break
         else:
             raise errors.anchorNotFound()
-
-    end = min(start + limit, len(ids)) if limit else len(ids)
+    
+    end = start + limit
+    if start < 0 and end >= 0:
+        end = len(messages)
     
     out = {
         'accountId': accountId,
         'filter': filter,
         'sort': sort,
         'collapseThreads': collapseThreads,
-        'queryState': newQueryState,
+        'queryState': account.db.highModSeqEmail,
         'canCalculateChanges': True,
         'position': start,
-        'total': len(ids),
-        'ids': ids[start:end],
+        'ids': [m['id'] for m in messages[start:end]],
     }
 
     if calculateTotal:
-        out['total'] = len(ids)
-        raise errors.invalidArguments('calculateTotal not supported')
+        out['total'] = len(messages)
+        # raise errors.invalidArguments('calculateTotal not supported')
 
     return out
 
 
+ALL_PROPERTIES = {
+    'id', 'blobId', 'threadId', 'mailboxIds',
+    'hasAttachemnt', 'keywords', 'subject',
+    'sentAt', 'receivedAt', 'size',
+    'from', 'to', 'cc', 'bcc', 'replyTo',
+    'messageId', 'inReplyTo', 'references', 'sender',
+    'attachments', 'hasAttachment', 'headers', 'preview',
+    'textBody', 'htmlBody', 'bodyValues', 'references',
+    # 'body'
+}
+ALL_BODY_PROPERTIES = {
+    "partId", "blobId", "size", "name", "type",
+    "charset", "disposition", "cid", "language", "location",
+}
+
+header_prop_re = re.compile(r'^header:([^:]+)(?::as(\w+))?(:all)?')
+
+HEADER_FORMS = {
+    None: asRaw,
+    'Raw': asRaw,
+    'Date': asDate,
+    'Text': asText,
+    'URLs': asURLs,
+    'Addresses': asAddresses,
+    'GroupedAddresses': asGroupedAddresses,
+    'MessageIds': asMessageIds,
+}
+
+
 def api_Email_get(request,
         accountId,
-        ids: list,
+        ids: list=None,
         properties=None,
         bodyProperties=None,
         fetchTextBodyValues=False,
@@ -87,138 +113,79 @@ def api_Email_get(request,
     https://jmap.io/spec-core.html#get
     """
     account = request.get_account(accountId)
-    newState = account.db.highModSeqEmail
-    seenids = set()
-    notFound = []
     lst = []
-    headers_wanted = set()
-    content_props = {'attachments', 'hasAttachment', 'headers', 'preview',
-                        'body', 'textBody', 'htmlBody', 'bodyValues', 'references'}
+    simple_props = set()
+    header_props = set()
     if properties:
-        need_content = False
         for prop in properties:
-            if prop.startswith('header:'):
-                headers_wanted.add(prop)
-                need_content = True
-            elif prop in content_props:
-                need_content = True
+            m = header_prop_re.match(prop)
+            if m:
+                header_props.add(m.group(0, 1, 2, 3))
+                simple_props.add('headers')
+            else:
+                simple_props.add(prop)
+        if 'body' in simple_props:
+            simple_props.remove('body')
+            simple_props.add('textBody')
+            simple_props.add('htmlBody')
     else:
-        properties = content_props + {
-            'threadId', 'mailboxIds',
-            'hasAttachemnt', 'keywords', 'subject', 'sentAt',
-            'receivedAt', 'size', 'blobId',
-            'from', 'to', 'cc', 'bcc', 'replyTo',
-            'messageId', 'inReplyTo', 'references', 'sender',
-        }
-        need_content = True
-    if not bodyProperties:
-        bodyProperties = {"partId", "blobId", "size", "name", "type",
-            "charset", "disposition", "cid", "language", "location",
-        }
+        properties = ALL_PROPERTIES
 
-    msgids = [request.idmap(i) for i in ids]
-    if need_content:
-        contents = account.db.fill_messages(msgids)
+    if bodyProperties is None:
+        bodyProperties = ALL_BODY_PROPERTIES
+
+    if header_props and 'headers' not in properties:
+        simple_props.remove('headers')
+    if ids is None:
+        # get all
+        messages = account.db.get_messages(simple_props)
     else:
-        contents = {}
+        notFound = set(request.idmap(i) for i in ids)
+        messages = account.db.get_messages(simple_props, id__in=notFound)
 
-    for msgid in msgids:
-        if msgid not in seenids:
-            seenids.add(msgid)
-            data = account.db.dgetone('jmessages', {'msgid': msgid})
-            if not data:
-                notFound.append(msgid)
-                continue
+    for msg in messages:
+        if ids is not None:
+            notFound.remove(msg['id'])
+        # Fill most of msg properties except header:*
+        data = {prop: msg[prop] for prop in simple_props}
+        data['id'] = msg['id']
+        if 'textBody' in msg and 'htmlBody' not in msg and not msg['textBody']:
+            data['textBody'] = htmltotext(msg['htmlBody'])
+        if 'bodyValues' in properties:
+            if fetchHTMLBodyValues:
+                data['bodyValues'] = {k: v for k, v in msg['bodyValues'].items() if v['type'] == 'text/html'}
+            elif fetchTextBodyValues:
+                data['bodyValues'] = {k: v for k, v in msg['bodyValues'].items() if v['type'] == 'text/plain'}
+            elif fetchAllBodyValues:
+                data['bodyValues'] = msg['bodyValues']
+            if maxBodyValueBytes:
+                for k, bodyValue in data['bodyValues'].items():
+                    if len(bodyValue['value']) > maxBodyValueBytes:
+                        bodyValue = {k: v for k, v in bodyValue.items()}
+                        bodyValue['value'] = bodyValue['value'][:maxBodyValueBytes]
+                        bodyValue['isTruncated'] = True,
+                        data['bodyValues'][k] = bodyValue
 
-        msg = {'id': msgid}
-        if 'blobId' in properties:
-            msg['blobId'] = msgid
-        if 'threadId' in properties:
-            msg['threadId'] = data['thrid']
-        if 'mailboxIds' in properties:
-            ids = account.db.dgetcol('jmessagemap', {'msgid': msgid, 'deleted': 0}, 'jmailboxid')
-            msg['mailboxIds'] = {i: True for i in ids}
-        if 'keywords' in properties:
-            msg['keywords'] = json.loads(data['keywords'])
-        if 'messageId' in properties:
-            msg['messageId'] = data['messageid'] and [data['messageid']]
+        for prop, name, form, getall in header_props:
+            try:
+                func = HEADER_FORMS[form]
+            except KeyError:
+                raise errors.invalidProperties(f'Unknown header-form {form} in {prop}')
 
-        for prop in ('from', 'to', 'cc', 'bcc', 'replyTo', 'sender'):
-            if prop in properties:
-                msg[prop] = json.loads(data[prop])
-        for prop in ('subject', 'size', 'inReplyTo', 'sentAt', 'receivedAt'):
-            if prop in properties:
-                msg[prop] = data[prop]
-        
-        if msgid in contents:
-            data = contents[msgid]
-            for prop in ('preview', 'textBody', 'htmlBody', 'attachments'):
-                if prop in properties:
-                    msg[prop] = data[prop]
-            if 'body' in properties:
-                if data['htmlBody']:
-                    msg['htmlBody'] = data['htmlBody']
-                else:
-                    msg['textBody'] = data['textBody']
-            if 'textBody' in msg and not msg['textBody']:
-                msg['textBody'] = htmltotext(data['htmlBody'])
-            if 'hasAttachment' in properties:
-                msg['hasAttachment'] = bool(data['hasAttachment'])
-            if 'headers' in properties:
-                msg['headers'] = data['headers']
-            if 'bodyStructure' in properties:
-                msg['bodyStructure'] = data['bodyStructure']
-            if 'references' in properties:
-                for hdr in data['headers']:
-                    if hdr['name'].lower() == 'references':
-                        msg['references'] = asMessageIds(hdr['value'])
-                        break
-                else:
-                    msg['references'] = []
-            if 'bodyValues' in properties:
-                if fetchAllBodyValues:
-                    msg['bodyValues'] = data['bodyValues']
-                elif fetchHTMLBodyValues:
-                    msg['bodyValues'] = {k: v for k, v in data['bodyValues'].items() if v['type'] == 'text/html'}
-                elif fetchTextBodyValues:
-                    msg['bodyValues'] = {k: v for k, v in data['bodyValues'].items() if v['type'] == 'text/plain'}
-                if maxBodyValueBytes:
-                    for val in msg['bodyValues'].values():
-                        val['value'] = val['value'][:maxBodyValueBytes]
-                        val['isTruncated'] = True
+            name = name.lower()
+            if getall:
+                data[prop] = [func(h['value'])
+                    for h in msg['headers'] if h['name'].lower() == name]
+            else:
+                data[prop] = func(msg.get_header(name))
 
-            for prop in headers_wanted:
-                try:
-                    _, field, form = prop.split(':')
-                except ValueError:
-                    field, form = prop[8:], 'raw'
-                field = field.lower()
-                if form == 'all':
-                    msg[prop] = [v for k, v in data['headers'] if k.lower() == field]
-                    continue
-                elif form == 'asDate':
-                    func = asDate
-                elif form == 'asText':
-                    func = asText
-                elif form == 'asURLs':
-                    func = asURLs
-                elif form == 'asAddresses':
-                    func = asAddresses
-
-                for hdr in data['headers']:
-                    if hdr['name'].lower() == field:
-                        msg[prop] = func(hdr['value'])
-                        break
-                else:
-                    msg[prop] = None
-
-        lst.append(msg)
+        lst.append(data)
 
     return {
         'accountId': accountId,
         'list': lst,
-        'state': newState,
-        'notFound': notFound
+        'state': account.db.highModSeqEmail,
+        'notFound': list(notFound),
     }
 
 

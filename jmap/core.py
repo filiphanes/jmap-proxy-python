@@ -3,11 +3,7 @@ def register_methods(api):
     api.methods['Blob/copy'] = api_Blob_copy
 
 capabilityValue = {
-    "collationAlgorithms": [
-        "i;ascii-numeric",
-        "i;ascii-casemap",
-        "i;octet"
-    ],
+    "collationAlgorithms": [],
     "maxCallsInRequest": 64,
     "maxObjectsInGet": 1000,
     "maxSizeUpload": 250000000,

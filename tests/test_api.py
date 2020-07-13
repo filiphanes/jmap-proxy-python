@@ -2,7 +2,11 @@ import pytest
 from jmap.api import handle_request
 from random import random
 
-INBOX_ID = "f1588506601"
+import orjson as json
+
+INBOX_ID = "988f1121e9afae5e81cb000039771c66"
+EMAIL_ID = 'mI8RIemvrl6BywAAOXccZl6ur-kAAAAH'
+
 
 def test_Mailbox_get_all(db, user):
     res = handle_request(user, {
@@ -32,6 +36,7 @@ def test_Mailbox_get_all(db, user):
             assert 'unreadThreads' in mailbox
             assert 'isSubscribed' in mailbox
             assert 'parentId' in mailbox
+    assert json.dumps(res)
 
 
 def test_Mailbox_create_destroy(db, user):
@@ -44,7 +49,7 @@ def test_Mailbox_create_destroy(db, user):
                 "create": {
                     "test": {
                         "parentId": INBOX_ID,
-                        "name": str(random()),
+                        "name": str(random())[2:10],
                     }
                 }
             }, "0"]
@@ -82,6 +87,7 @@ def test_Mailbox_create_destroy(db, user):
         assert response['destroyed']
         assert newId in response['destroyed']
         assert not response['notDestroyed']
+    assert json.dumps(res)
 
 
 def test_Email_query_inMailbox(db, user):
@@ -114,6 +120,7 @@ def test_Email_query_inMailbox(db, user):
         assert 'filter' in response
         assert 'sort' in response
         assert 'canCalculateChanges' in response
+    assert json.dumps(res)
 
 
 def test_Email_get(db, user):
@@ -122,14 +129,14 @@ def test_Email_get(db, user):
         'sentAt', 'receivedAt', 'size', 'blobId',
         'from', 'to', 'cc', 'bcc', 'replyTo',
         'attachments', 'hasAttachment',
-        'headers', 'preview', 'body', 'textBody', 'htmlBody',
+        'headers', 'preview', 'body',
     }
     res = handle_request(user, {
         "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
         "methodCalls": [
             ["Email/get", {
                 "accountId": user.username,
-                "ids": ["f1588506601_7", "notexisting"],
+                "ids": [EMAIL_ID, "notexisting"],
                 "properties": list(properties),
             }, "1"]
         ]
@@ -146,6 +153,8 @@ def test_Email_get(db, user):
         for msg in response['list']:
             for prop in properties - {'body'}:
                 assert prop in msg
+            assert 'textBody' in msg or 'htmlBody' in msg
+    assert json.dumps(res)
 
 
 def test_Email_get_detail(db, user):
@@ -164,7 +173,7 @@ def test_Email_get_detail(db, user):
         "methodCalls": [
             ["Email/get", {
                 "accountId": user.username,
-                "ids": ["m9dda32a70"],
+                "ids": [EMAIL_ID],
                 "properties": list(properties),
                 "fetchHTMLBodyValues": True,
                 "bodyProperties": bodyProperties,
@@ -183,6 +192,7 @@ def test_Email_get_detail(db, user):
         for msg in response['list']:
             for prop in properties - {'body'}:
                 assert prop in msg
+    assert json.dumps(res)
 
 
 def test_Email_set(db, user):
@@ -216,6 +226,7 @@ def test_Email_set(db, user):
         assert len(response['notCreated']) == 0
         assert len(response['destroyed']) == 0
         assert len(response['notDestroyed']) == 0
+    assert json.dumps(res)
 
 
 def test_Email_query_first_page(db, user):
@@ -230,7 +241,7 @@ def test_Email_query_first_page(db, user):
         ["Email/query", {
             "accountId": user.username,
             "filter": {
-                "inMailbox": INBOX_ID
+                "inMailbox": "6833392b2940de5ecddd000039771c66",  # Junk
             },
             "sort": [
                 {"property": "receivedAt", "isAscending": False}
@@ -287,6 +298,7 @@ def test_Email_query_first_page(db, user):
             for msg in response['list']:
                 for prop in properties:
                     assert prop in msg
+    assert json.dumps(res)
 
 
 def test_Email_query_second_page(db, user):
@@ -328,6 +340,7 @@ def test_Email_query_second_page(db, user):
             for msg in response['list']:
                 for prop in properties:
                     assert prop in msg
+    assert json.dumps(res)
 
 
 def test_Email_changes(db, user):
@@ -342,6 +355,7 @@ def test_Email_changes(db, user):
         }, "0"],
     ]})
     assert len(res['methodResponses']) == 2
+    assert json.dumps(res)
 
 
 def test_Thread_changes(db, user):
@@ -356,6 +370,7 @@ def test_Thread_changes(db, user):
         }, "0"],
     ]})
     assert len(res['methodResponses']) == 2
+    assert json.dumps(res)
 
 
 def test_Mailbox_changes(db, user):
@@ -395,3 +410,4 @@ def test_Mailbox_changes(db, user):
     for method, response, tag in res['methodResponses']:
         if tag == '0':
             assert len(response['list']) > 0
+    assert json.dumps(res)

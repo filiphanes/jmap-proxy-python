@@ -1,8 +1,10 @@
 from jmap.db.imap import ImapDB
 
-class ImapAccount:
+class Account:
     is_personal = True
 
+
+class ImapAccount(Account):
     def __init__(self, accountId, password):
         self.id = accountId
         self.name = accountId
@@ -21,11 +23,11 @@ class ImapAccount:
                 "maxMailboxDepth": None,
                 "emailQuerySortOptions": [
                     "receivedAt",
-                    "from",
-                    "to",
+                    # "from",
+                    # "to",
                     "subject",
                     "size",
-                    "header.x-spam-score"
+                    # "header.x-spam-score"
                 ]
             }
         }

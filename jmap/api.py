@@ -2,6 +2,7 @@ import logging as log
 from time import monotonic
 import re
 
+from jmap.account import ImapAccount
 import jmap.core as core
 import jmap.mail as mail
 import jmap.submission as submission
@@ -31,8 +32,9 @@ def handle_request(user, data):
     for cmd, kwargs, tag in data['methodCalls']:
         t0 = monotonic()
         logbit = ''
-        func = api.methods.get(cmd, None)
-        if not func:
+        try:
+            func = api.methods[cmd]
+        except KeyError:
             results.append(('error', {'error': 'unknownMethod'}, tag))
             continue
 
@@ -82,7 +84,7 @@ def handle_request(user, data):
 
     out = {
         'methodResponses': results,
-        'sessionState': '0',
+        'sessionState': user.sessionState,
     }
     if 'createdIds' in data:
         out['createdIds'] = data['createdIds']
@@ -95,7 +97,7 @@ class Api:
         self._idmap = idmap or {}
         self.methods = {}
     
-    def get_account(self, accountId):
+    def get_account(self, accountId) -> ImapAccount:
         try:
             return self.user.accounts[accountId]
         except KeyError:
