@@ -5,7 +5,7 @@ from random import random
 import orjson as json
 
 INBOX_ID = "988f1121e9afae5e81cb000039771c66"
-EMAIL_ID = 'mI8RIemvrl6BywAAOXccZl6ur-kAAAAH'
+EMAIL_ID = '988f1121e9afae5e81cb000039771c66_1588506601_7'
 
 
 def test_Mailbox_get_all(db, user):
@@ -202,7 +202,7 @@ def test_Email_set(db, user):
             ["Email/set", {
                 "accountId": user.username,
                 "update": {
-                    "mdfe661a66": {
+                    EMAIL_ID: {
                         "keywords/$seen": None
                     }
                 }

@@ -18,18 +18,18 @@ def api_Mailbox_get(request, accountId=None, ids=None, properties=None):
     https://jmap.io/spec-core.html#get
     """
     account = request.get_account(accountId)
-    rows = account.db.get_mailboxes(deleted=0)
+    mailboxes = account.db.get_mailboxes(deleted=0)
 
     if ids:
         want = set(request.idmap(i) for i in ids)
     else:
-        want = set(d['id'] for d in rows)
+        want = set(d['id'] for d in mailboxes)
 
     if not properties:
         properties = ('id', 'name', 'parentId', 'role', 'sortOrder', 'totalEmails',
             'unreadEmails', 'totalThreads', 'unreadThreads', 'myRights', 'isSubscribed')
     lst = []
-    for mbox in rows:
+    for mbox in mailboxes:
         id = mbox['id']
         if id in want:
             want.remove(id)
@@ -55,9 +55,9 @@ def api_Mailbox_set(request, accountId=None, ifInState=None, create=None, update
     """
     account = request.get_account(accountId)
     account.db.sync_mailboxes()
-    if ifInState is not None and ifInState != account.db.highModSeqMailbox:
-        raise errors.stateMismatch()
     oldState = account.db.highModSeqMailbox
+    if ifInState is not None and ifInState != oldState:
+        raise errors.stateMismatch()
 
     # CREATE
     created = {}
@@ -77,7 +77,7 @@ def api_Mailbox_set(request, accountId=None, ifInState=None, create=None, update
     if update:
         for id, mailbox in update.items():
             try:
-                account.db.update_mailbox(id, **update)
+                account.db.update_mailbox(id, **mailbox)
                 updated[id] = mailbox
             except errors.JmapError as e:
                 notUpdated[id] = {'type': e.__class__.__name__, 'description': str(e)}
@@ -112,11 +112,11 @@ def api_Mailbox_query(request, accountId=None, sort=None, filter=None, position=
     https://jmap.io/spec-core.html#get
     """
     account = request.get_account(accountId)
-    rows = account.db.get_mailboxes()
+    mailboxes = account.db.get_mailboxes()
     if filter:
-        rows = [d for d in rows if _mailbox_match(d, filter)]
+        mailboxes = [d for d in mailboxes if _mailbox_match(d, filter)]
 
-    data = _mailbox_sort(rows, sort, {'data': rows})
+    data = _mailbox_sort(mailboxes, sort, {'data': mailboxes})
 
     start = position
     if anchor:
@@ -154,16 +154,16 @@ def api_Mailbox_changes(request, accountId, sinceState, maxChanges=None, **kwarg
     new_state = account.db.highModSeqMailbox
     if sinceState <= str(account.db.lowModSeq):
         raise errors.cannotCalculateChanges({'new_state': new_state})
-    rows = account.db.get_mailboxes(modseq__gt=sinceState)
+    mailboxes = account.db.get_mailboxes(modseq__gt=sinceState)
 
-    if maxChanges and len(rows) > maxChanges:
+    if maxChanges and len(mailboxes) > maxChanges:
         raise errors.cannotCalculateChanges({'new_state': new_state})
 
     created = []
     updated = []
     removed = []
     only_counts = 0
-    for mbox in rows:
+    for mbox in mailboxes:
         if not mbox['deleted']:
             if mbox['created'] <= sinceState:
                 updated.append(mbox['id'])

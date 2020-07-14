@@ -53,8 +53,7 @@ def parse(rfc822, id=None):
 
 
 def parse_email(id, eml, part=None):
-    bodyValues = {}
-    bodyStructure = bodystructure(bodyValues, id, eml)
+    bodyStructure, bodyValues = bodystructure(id, eml)
     textBody, htmlBody, attachments = parseStructure([bodyStructure], 'mixed', False)
     subject = str(make_header(decode_header(eml['Subject'])))
     return {
@@ -262,3 +261,12 @@ def make(args, blobs):
         msg.add_attachment(_makeatt(att, blobs))
     
     return msg.as_string()
+
+
+def normal_subject(subject):
+    # Re: and friends
+    subject = re.sub(r'^[ \t]*[A-Za-z0-9]+:', subject, '')
+    # [LISTNAME] and friends
+    sub = re.sub(r'^[ \t]*\\[[^]]+\\]', subject, '')
+    # any old whitespace
+    sub = re.sub(r'[ \t\r\n]+', subject, '')

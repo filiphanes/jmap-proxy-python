@@ -224,23 +224,48 @@ def api_Email_changes(request, accountId, sinceState, maxChanges=None):
     }
 
 
-def api_Email_set(request, accountId, create={}, update={}, destroy=()):
+def api_Email_set(request, accountId, ifInState=None, create={}, update={}, destroy=()):
     account = request.get_account(accountId)
-
-    # get state up-to-date first
-    account.db.sync_imap()
     oldState = account.db.highModSeqEmail
-    created, notCreated = account.db.create_messages(create, request.idmap)
-    for id, msg in created.items():
-        request.setid(id, msg['id'])
+    if ifInState is not None and ifInState != oldState:
+        raise errors.stateMismatch()
 
+    # CREATE
+    created = {}
+    notCreated = {}
+    if create:
+        for cid, message in create.items():
+            try:
+                id = account.db.create_message(**message)
+                created[cid] = {'id': id}
+                request.setid(cid, id)
+            except errors.JmapError as e:
+                notCreated[cid] = {'type': e.__class__.__name__, 'description': str(e)}
+
+    # UPDATE
+    updated = {}
+    notUpdated = {}
     resolve_patch(request, accountId, update, api_Email_get)
-    updated, notUpdated = account.db.update_messages(update, request.idmap)
-    destroyed, notDestroyed = account.db.destroy_messages(destroy)
+    if update:
+        for id, message in update.items():
+            try:
+                account.db.update_message(id, **update)
+                updated[id] = message
+            except errors.JmapError as e:
+                notUpdated[id] = {'type': e.__class__.__name__, 'description': str(e)}
 
-    # XXX - cheap dumb racy version
-    account.db.sync_imap()
-    newState = account.db.highModSeqEmail
+    # DESTROY
+    destroyed = []
+    notDestroyed = {}
+    if destroy:
+        for id in destroy:
+            try:
+                account.db.destroy_message(id)
+                destroyed.append(id)
+            except errors.JmapError as e:
+                notDestroyed[id] = {'type': e.__class__.__name__, 'description': str(e)}
+
+
 
     for cid, msg in created.items():
         created[cid]['blobId'] = msg['id']
@@ -248,7 +273,7 @@ def api_Email_set(request, accountId, create={}, update={}, destroy=()):
     return {
         'accountId': accountId,
         'oldState': oldState,
-        'newState': newState,
+        'newState': account.db.highModSeqEmail,
         'created': created,
         'notCreated': notCreated,
         'updated': updated,
@@ -256,134 +281,6 @@ def api_Email_set(request, accountId, create={}, update={}, destroy=()):
         'destroyed': destroyed,
         'notDestroyed': notDestroyed,
     }
-
-
-def _post_sort(data, sortargs, storage):
-    return data
-    # TODO: sort key function
-    fieldmap = {
-        'id': ('msgid', 0),
-        'receivedAt': ('receivedAt', 1),
-        'sentAt': ('sentAt', 1),
-        'size': ('size', 1),
-        'isUnread': ('isUnread', 1),
-        'subject': ('sortsubject', 0),
-        'from': ('from', 0),
-        'to': ('to', 0),
-    }
-
-
-def _load_msgmap(account, id):
-    rows = account.db.dget('jmessagemap', {}, 'msgid,jmailbox,jmodseq,deleted')
-    msgmap = defaultdict(dict)
-    for row in rows:
-        msgmap[row['msgid']][row['jmailbox']] = row
-    return msgmap
-
-
-def _hasthreadkeyword(messages):
-    res = {}
-    for msg in messages:
-        # we get called by getEmailListUpdates, which includes deleted messages
-        if msg['deleted']:
-            continue
-        # have already seen a message for this thread
-        if msg['thrid'] in res:
-            for keyword in msg['keywords'].keys():
-                # if not already known about, it wasn't present on previous messages, so it's a "some"
-                if not res[msg['thrid']][keyword]:
-                    res[msg['thrid']][keyword] = 1
-            for keyword in res[msg['thrid']].keys():
-                # if it was known already, but isn't on this one, it's a some
-                if not msg['keywords'][keyword]:
-                    res[msg['thrid']][keyword] = 1
-        else:
-            # first message, it's "all" for every keyword
-            res[msg['thrid']] = {kw: 2 for kw in msg['keywords'].keys()}
-    return res
-
-
-def _match(account, item, condition, storage, idmap):
-    if 'operator' in condition:
-        if condition['operator'] == 'NOT':  # NOR
-            for cond in condition['conditions']:
-                if _match(account, item, cond, storage, idmap):
-                    return False
-            return True
-        elif condition['operator'] == 'OR':
-            for cond in condition['conditions']:
-                if _match(account, item, cond, storage, idmap):
-                    return True
-            return False
-        elif condition['operator'] == 'AND':
-            for cond in condition['conditions']:
-                if not _match(account, item, cond, storage, idmap):
-                    return False
-            return True
-        raise ValueError(f"Invalid operator {condition['operator']}")
-    
-    cond = condition.get('inMailbox', None)
-    if cond:
-        id = idmap(cond)
-        if 'mailbox' not in storage:
-            storage['mailbox'] = {}
-        if id not in storage['mailbox']:
-            storage['mailbox'][id] = account.db.dgetby('jmessagemap', 'msgid', {'jmailboxid': id}, 'msgid,jmodseq,deleted')
-        if item['msgid'] not in storage['mailbox'][id]\
-            or storage['mailbox'][id][item['msgid']]['deleted']:
-            return False
-    
-    cond = condition.get('inMailboxOtherThan', None)
-    if cond:
-        if 'msgmap' not in storage:
-            storage['msgmap'] = _load_msgmap(account)
-        if not isinstance(cond, list):
-            cond = [cond]
-        match = set(idmap(id) for id in cond)
-        data = storage['msgmap'].get(item['msgid'], {})
-        for id, msg in data.items():
-            if id not in match and not msg['deleted']:
-                break
-        else:
-            return False
-    
-    cond = condition.get('hasAttachment', None)
-    if cond is not None:
-        if 'hasatt' not in storage:
-            storage['hasatt'] = set(account.db.dgetcol('jrawmessage', {'hasAttachment':1}, 'msgid'))
-        if item['msgid'] not in storage['hasatt']:
-            return False
-    
-    if 'search' not in storage:
-        search = []
-        for field in ('before','after','text','from','to','cc','bcc','subject','body','header'):
-            if field in condition:
-                search.append(field)
-                search.append(condition[field])
-        for cond, field in [
-                ('minSize', 'LARGER'),   # or NOT SMALLER?
-                ('maxSize', 'SMALLER'),  # or NOT LARGER?
-                ('hasKeyword', 'KEYWORD'),
-                ('notKeyword', 'UNKEYWORD'),
-            ]:
-            if cond in condition:
-                search.append(field)
-                search.append(condition[cond])
-
-        # TODO: this is not correct when there are searches in multiple filter branches
-        if search:
-            storage['search'] = set(account.db.imap.search(search))
-        else:
-            storage['search'] = None
-
-    if storage['search'] is not None and item['msgid'] not in storage['search']:
-        return False
-    
-    #TODO: allInThreadHaveKeyword
-    #TODO: someInThreadHaveKeyword
-    #TODO: noneInThreadHaveKeyword
-
-    return True
 
 
 def _collapse_messages(messages):
