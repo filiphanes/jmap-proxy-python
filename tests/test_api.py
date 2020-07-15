@@ -5,7 +5,7 @@ from random import random
 import orjson as json
 
 INBOX_ID = "988f1121e9afae5e81cb000039771c66"
-EMAIL_ID = '988f1121e9afae5e81cb000039771c66_1588506601_7'
+EMAIL_ID = "100"
 
 
 def test_Mailbox_get_all(db, user):
@@ -196,37 +196,38 @@ def test_Email_get_detail(db, user):
 
 
 def test_Email_set(db, user):
-    res = handle_request(user, {
-        "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
-        "methodCalls": [
-            ["Email/set", {
-                "accountId": user.username,
-                "update": {
-                    EMAIL_ID: {
-                        "keywords/$seen": None
+    for state in (True, False):
+        res = handle_request(user, {
+            "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
+            "methodCalls": [
+                ["Email/set", {
+                    "accountId": user.username,
+                    "update": {
+                        EMAIL_ID: {
+                            "keywords/$seen": state
+                        }
                     }
-                }
-            }, "0"]
-        ]
-    })
-    assert len(res['methodResponses']) == 1
-    for method, response, tag in res['methodResponses']:
-        assert method == "Email/set"
-        assert tag == "0"
-        assert response['accountId'] == user.username
-        assert isinstance(response['updated'], dict)
-        assert isinstance(response['notUpdated'], dict)
-        assert isinstance(response['created'], dict)
-        assert isinstance(response['notCreated'], dict)
-        assert isinstance(response['destroyed'], list)
-        assert isinstance(response['notDestroyed'], dict)
-        assert len(response['updated']) > 0
-        assert len(response['notUpdated']) == 0
-        assert len(response['created']) == 0
-        assert len(response['notCreated']) == 0
-        assert len(response['destroyed']) == 0
-        assert len(response['notDestroyed']) == 0
-    assert json.dumps(res)
+                }, "0"]
+            ]
+        })
+        assert len(res['methodResponses']) == 1
+        for method, response, tag in res['methodResponses']:
+            assert method == "Email/set"
+            assert tag == "0"
+            assert response['accountId'] == user.username
+            assert isinstance(response['updated'], dict)
+            assert isinstance(response['notUpdated'], dict)
+            assert isinstance(response['created'], dict)
+            assert isinstance(response['notCreated'], dict)
+            assert isinstance(response['destroyed'], list)
+            assert isinstance(response['notDestroyed'], dict)
+            assert len(response['updated']) > 0
+            assert len(response['notUpdated']) == 0
+            assert len(response['created']) == 0
+            assert len(response['notCreated']) == 0
+            assert len(response['destroyed']) == 0
+            assert len(response['notDestroyed']) == 0
+        assert json.dumps(res)
 
 
 def test_Email_query_first_page(db, user):

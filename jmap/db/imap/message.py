@@ -3,17 +3,17 @@ import email
 from email.policy import default
 import re
 
-from jmap.parse import asAddresses, asDate, asMessageIds, asText, bodystructure, htmltotext, parseStructure
+from jmap.parse import asAddresses, asDate, asMessageIds, asText, bodystructure, htmltotext, make, parseStructure
 from jmap import errors
 
 
 KEYWORD2FLAG = {
-    '$answered': '\\Answered',
-    '$flagged': '\\Flagged',
-    '$draft': '\\Draft',
-    '$seen': '\\Seen',
+    '$answered': b'\\Answered',
+    '$flagged': b'\\Flagged',
+    '$draft': b'\\Draft',
+    '$seen': b'\\Seen',
 }
-FLAG2KEYWORD = {f.lower().encode(): kw for kw, f in KEYWORD2FLAG.items()}
+FLAG2KEYWORD = {flag.lower(): kw for kw, flag in KEYWORD2FLAG.items()}
 
 
 FIELDS_MAP = {
@@ -147,6 +147,14 @@ class ImapMessage(dict):
             = parseStructure([self['bodyStructure']], 'mixed', False)
         return attachments
 
+    # Used when creating message
+    def getFlags(self):
+        return [KEYWORD2FLAG.get(kw.lower(), kw) for kw in self['keywords']]
+
+    def getRFC822(self):
+        return make(self, {})
+
+
 # Define address getters
 # "from" is python reserved keyword, others are similar
 def address_getter(field):
@@ -157,14 +165,18 @@ for prop in ('from', 'to', 'cc', 'bcc', 'sender'):
     setattr(ImapMessage, prop, address_getter(prop))
 
 
-def format_message_id(mailboxid, uidvalidity, uid):
-    "creates message id from components"
-    return f'{mailboxid}_{uidvalidity}_{uid}'
+def format_message_id(uid):
+    return str(uid)
+def parse_message_id(id):
+    return int(id)
 
-def parse_message_id(messageid):
-    "parses given messageid to components"
-    mailboxid, uidvalidity, uid = messageid.split('_')
-    return mailboxid, int(uidvalidity), int(uid)
+# def format_message_id(mailboxid, uidvalidity, uid):
+#     "creates message id from components"
+#     return f'{mailboxid}_{uidvalidity}_{uid}'
+# def parse_message_id(messageid):
+#     "parses given messageid to components"
+#     mailboxid, uidvalidity, uid = messageid.split('_')
+#     return mailboxid, int(uidvalidity), int(uid)
 
 # def format_message_id(mailboxid, uidvalidity, uid):
 #     return b2a_base64(
@@ -173,7 +185,6 @@ def parse_message_id(messageid):
 #         uid.to_bytes(4, 'big'),
 #         newline=False
 #     ).replace(b'+', b'-').replace(b'/', b'_').decode()
-
 # def parse_message_id(messageid):
 #     b = a2b_base64(messageid.encode().replace(b'-', b'+').replace(b'_', b'/'))
 #     return b[:16].hex(), \

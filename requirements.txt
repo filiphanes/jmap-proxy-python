@@ -1,3 +1,4 @@
+aiofiles
 orjson
 starlette
 uvicorn

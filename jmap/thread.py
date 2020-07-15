@@ -13,10 +13,10 @@ def api_Thread_get(request, accountId, ids: list=None):
     threads = defaultdict(list)
     if ids is None:
         # get all
-        messages = account.db.get_messages('id')
+        messages = account.db.get_messages('id', deleted=0)
     else:
         notFound = set(request.idmap(id) for id in ids)
-        messages = account.db.get_messages(['id'], threadId__in=notFound)
+        messages = account.db.get_messages(['id'], threadId__in=notFound, deleted=0)
     for msg in messages:
         threads[msg['threadId']].append(msg['id'])
         if ids is not None:

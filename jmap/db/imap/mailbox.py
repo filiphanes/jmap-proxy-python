@@ -36,13 +36,11 @@ ROLE_MAP = {
 
 class ImapMailbox(dict):
     def __missing__(self, key):
-        self[key] = getattr(self, key)()
-        return self[key]
+        return getattr(self, key)()
 
     def name(self):
         try:
             parentname, name = self['imapname'].rsplit(self['sep'], maxsplit=1)
-            self['parentId'] = self['byimapname'][parentname]['id']
             return name
         except ValueError:
             return self['imapname']
@@ -50,7 +48,6 @@ class ImapMailbox(dict):
     def parentId(self):
         try:
             parentname, name = self['imapname'].rsplit(self['sep'], maxsplit=1)
-            self['name'] = name
             return self['byimapname'][parentname]['id']
         except ValueError:
             return None

@@ -69,7 +69,7 @@ def api_Mailbox_set(request, accountId=None, ifInState=None, create=None, update
                 created[cid] = {'id': id}
                 request.setid(cid, id)
             except errors.JmapError as e:
-                notCreated[cid] = {'type': e.__class__.__name__, 'description': str(e)}
+                notCreated[cid] = e.to_dict()
 
     # UPDATE
     updated = {}
@@ -80,7 +80,7 @@ def api_Mailbox_set(request, accountId=None, ifInState=None, create=None, update
                 account.db.update_mailbox(id, **mailbox)
                 updated[id] = mailbox
             except errors.JmapError as e:
-                notUpdated[id] = {'type': e.__class__.__name__, 'description': str(e)}
+                notUpdated[id] = e.to_dict()
 
     # DESTROY
     destroyed = []
@@ -91,7 +91,7 @@ def api_Mailbox_set(request, accountId=None, ifInState=None, create=None, update
                 account.db.destroy_mailbox(id)
                 destroyed.append(id)
             except errors.JmapError as e:
-                notDestroyed[id] = {'type': e.__class__.__name__, 'description': str(e)}
+                notDestroyed[id] = e.to_dict()
 
     return {
         'accountId': accountId,

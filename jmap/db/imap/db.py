@@ -1,9 +1,10 @@
-from imapclient import IMAPClient
-from imapclient.exceptions import IMAPClientError
+import re
 
-from jmap import errors
+from imapclient import IMAPClient, imap_utf7
+from imapclient.exceptions import IMAPClientError
+from jmap import errors, parse
 from ..base import BaseDB
-from .message import ImapMessage, FIELDS_MAP, format_message_id, parse_message_id
+from .message import ImapMessage, FIELDS_MAP, format_message_id, parse_message_id, KEYWORD2FLAG
 from .mailbox import ImapMailbox
 
 
@@ -12,6 +13,8 @@ class ImapDB(BaseDB):
         super().__init__(username, *args, **kwargs)
         self.imap = IMAPClient(host, port, use_uid=True, ssl=False)
         res = self.imap.login(username, password)
+        self.imap.enable("UTF8=ACCEPT")
+        self.imap.enable("QRESYNC")
         self.cursor.execute("SELECT lowModSeq,highModSeq,highModSeqMailbox,highModSeqThread,highModSeqEmail FROM account LIMIT 1")
         row = self.cursor.fetchone()
         self.lastfoldersync = 0
@@ -26,13 +29,19 @@ class ImapDB(BaseDB):
             self.highModSeq = 1
             self.highModSeqMailbox = 1
             self.highModSeqThread = 1
-            self.highModSeqEmail = 1
 
-        # (imapname, readonly)
-        self.selected_folder = (None, False)
         self.mailboxes = {}
+        self.byimapname = {}
         self.messages = {}
         self.sync_mailboxes()
+
+        res = self.imap.select_folder('virtual/All')
+        self.selected_folder = 'virtual/All'
+        try:
+            self.highModSeqEmail = res[b'HIGHESTMODSEQ']
+        except KeyError:
+            res = self.imap.folder_status('virtual/All', [b'HIGHESTMODSEQ'])
+            self.highModSeqEmail = res[b'HIGHESTMODSEQ']
 
 
     def get_cached_messaged(self, properties=(), id__in=()):
@@ -59,7 +68,8 @@ class ImapDB(BaseDB):
             fetch_props = properties
         return messages, fetch_ids, fetch_props
 
-    def get_messages(self, properties=(), sort={}, inMailbox=None, inMailboxOtherThan=(), id__in=None, threadId__in=None, **criteria):
+
+    def get_messages(self, properties=(), sort={}, id__in=None, threadId__in=None, state__gt=None, **criteria):
         # XXX: id == threadId for now
         if id__in is None and threadId__in is not None:
             id__in = [id[1:] for id in threadId__in]
@@ -75,20 +85,10 @@ class ImapDB(BaseDB):
             fetch_fields.discard('RFC822.HEADER')
             fetch_fields.discard('RFC822.SIZE')
 
-        if inMailbox:
-            mailbox = self.mailboxes.get(inMailbox, None)
-            if not mailbox:
-                raise errors.notFound(f'Mailbox {inMailbox} not found')
-            mailboxes = [mailbox]
-        elif inMailboxOtherThan:
-            mailboxes = [m for m in self.mailboxes.values() if m['id'] not in inMailboxOtherThan]
-        else:
-            mailboxes = self.mailboxes.values()
-
-        search_criteria = as_imap_search(criteria)
+        search_criteria = self.as_imap_search(criteria)
         sort_criteria = as_imap_sort(sort) or '' if sort else None
 
-        mailbox_uids = {}
+        uids = []
         if id__in is not None:
             if len(id__in) == 0:
                 return messages  # no messages matches empty ids
@@ -97,69 +97,123 @@ class ImapDB(BaseDB):
                 # useful when requested conditions can be calculated from id (threadId)
                 messages.extend(self.messages.get(id, 0) or ImapMessage(id=id) for id in id__in)
                 return messages
-            
             for id in id__in:
                 # TODO: check uidvalidity
                 try:
-                    mailboxid, uidvalidity, uid = parse_message_id(id)
+                    uid = parse_message_id(id)
                 except ValueError:
                     # not parsable == not found
                     continue
-                uids = mailbox_uids.get(mailboxid, [])
-                if not uids:
-                    mailbox_uids[mailboxid] = uids
                 uids.append(uid)
-            # filter out unnecessary mailboxes
-            mailboxes = [m for m in mailboxes if m['id'] in mailbox_uids]
 
-        for mailbox in mailboxes:
-            imapname = mailbox['imapname']
-            if self.selected_folder[0] != imapname:
-                self.imap.select_folder(imapname, readonly=True)
-                self.selected_folder = (imapname, True)
+        # id__in is now None or notempty
+        uids = b','.join(b'%d'%i for i in uids) if id__in else None
 
-            uids = mailbox_uids.get(mailbox['id'], None)
-            # uids are now None or not empty
-            # fetch all
-            if sort_criteria:
-                if uids:
-                    search = f'{",".join(map(str, uids))} {search_criteria}'
-                else:
-                    search = search_criteria or 'ALL'
-                uids = self.imap.sort(sort_criteria, search)
-            elif search_criteria:
-                if uids:
-                    search = f'{",".join(map(str, uids))} {search_criteria}'
-                uids = self.imap.search(search)
-            if uids is None:
-                uids = '1:*'
-            fetch_fields.add('UID')
+        if sort_criteria:
+            if uids:
+                search_criteria += b' UID %s' % uids
+            uids = self.imap.sort(sort_criteria, search_criteria)
+        elif search_criteria:
+            if uids:
+                search_criteria += b' UID %s' % uids
+            uids = self.imap.search(search_criteria)
+
+        if uids is None:
+            uids = b'1:*'
+        fetch_fields.add('X-MAILBOX')
+        if state__gt:
+            fetches = self.imap.fetch(uids, fetch_fields, 'changedsince %s vanished' % state__gt)
+        else:
             fetches = self.imap.fetch(uids, fetch_fields)
 
-            for uid, data in fetches.items():
-                id = format_message_id(mailbox['id'], mailbox['uidvalidity'], uid)
-                msg = self.messages.get(id, None)
-                if not msg:
-                    msg = ImapMessage(id=id, mailboxIds=[mailbox['id']])
-                    self.messages[id] = msg
-                for k, v in data.items():
-                    msg[k.decode()] = v
-                messages.append(msg)
+        for uid, data in fetches.items():
+            id = format_message_id(uid)
+            msg = self.messages.get(id, None)
+            if not msg:
+                imapname = data[b'X-MAILBOX'].decode()
+                msg = ImapMessage(id=id, mailboxIds=[self.byimapname[imapname]['id']])
+                self.messages[id] = msg
+            for k, v in data.items():
+                msg[k.decode()] = v
+            messages.append(msg)
+
         return messages
 
-    def get_raw_message(self, msgid, part=None):
-        self.cursor.execute('SELECT imapname,uidvalidity,uid FROM ifolders JOIN imessages USING (ifolderid) WHERE msgid=?', [msgid])
-        imapname, uidvalidity, uid = self.cursor.fetchone()
-        if not imapname:
-            return None
-        typ = 'message/rfc822'
-        if part:
-            parsed = self.fill_messages([msgid])
-            typ = find_type(parsed[msgid], part)
+
+    def create_message(self, mailboxIds=None, **data):
+        if not mailboxIds:
+            raise errors.invalidArguments('mailboxIds is required when creating email')
+        msg = ImapMessage(**data)
+        try:
+            mailboxid, = mailboxIds
+        except ValueError:
+            raise errors.tooManyMailboxes('Only 1 mailbox allowed in this implementation')
+        try:
+            mailbox = self.mailboxes[mailboxid]
+        except KeyError:
+            raise errors.notFound(f"Mailbox {mailboxid} not found")
+        res = self.imap.append(mailbox['imapname'], msg['RFC822'], flags=msg['flags'])
+        # TODO parse res, get uid, fetch x-guid, return id
+        match = re.search(r'\[APPENDUID=(\d+)\]', res)
+        return format_message_id(int(match.group(1)))
 
 
-        res = self.imap.getpart(imapname, uidvalidity, uid, part)
-        return typ, res['data']
+    def update_message(self, id, ifInState=None, **update):
+        uid = parse_message_id(id)
+        flags_add = []
+        flags_del = []
+        mids_add = []
+        mids_del = []
+        for path in sorted(update.keys()):
+            try:
+                prop, key = path.split('/')
+                if prop == 'keywords':
+                    if update[path]:
+                        flags_add.append(KEYWORD2FLAG.get(key, key))
+                    else:
+                        flags_del.append(KEYWORD2FLAG.get(key, key))
+                elif prop == 'mailboxId':
+                    if update[path]:
+                        mids_add.append(key)
+                    else:
+                        mids_del.append(key)
+                else:
+                    raise errors.invalidArguments(f"Unknown update {path}")
+            except ValueError:
+                items = update[path].items()
+                if path == 'keywords':
+                    flags_add = [KEYWORD2FLAG.get(k, k) for k,v in items if v]
+                    flags_del = [KEYWORD2FLAG.get(k, k) for k,v in items if not v]
+                elif path == 'mailboxIds':
+                    mids_add = [k for k, v in items if v]
+                    mids_del = [k for k, v in items if not v]
+                else:
+                    raise errors.invalidArguments(f"Unknown update {path}")
+
+        if flags_add:
+            self.imap.add_flags(uid, flags_add)
+        if flags_del:
+            self.imap.remove_flags(uid, flags_del)
+        
+        if mids_add or mids_del:
+            if flags_add or flags_del:
+                error = errors.serverPartialFail
+            else:
+                error = errors.tooManyMailboxes
+            raise error("This implementation don't support Email/set mailboxIds, use Email/copy")
+
+
+    def destroy_message(self, id):
+        uid = parse_message_id(id)
+        try:
+            self.imap.add_flags(uid, b'\\Deleted')
+            # remove from cache
+            self.messages.pop(id, None)
+            # if you want to remove this expunge,
+            # then you need to work with NOT DELETED messages elsewhere
+            self.imap.expunge(uid)
+        except IMAPClientError:
+            raise errors.notFound()
 
 
     def get_mailboxes(self, fields=None, **criteria):
@@ -167,14 +221,21 @@ class ImapDB(BaseDB):
         return self.mailboxes.values()
 
     def sync_mailboxes(self):
-        byimapname = {}
         # TODO: LIST "" % RETURN (STATUS (MESSAGES UIDVALIDITY HIGHESTMODSEQ X-GUID))
+        deleted = set(self.mailboxes.keys())
         for flags, sep, imapname in self.imap.list_folders():
             if b'\\Noselect' in flags:
                 continue
             status = self.imap.folder_status(imapname, (['MESSAGES', 'UIDVALIDITY', 'UIDNEXT', 'HIGHESTMODSEQ', 'X-GUID']))
-            byimapname[imapname] = ImapMailbox(
-                id=status[b'X-GUID'].decode(),
+            id = status[b'X-GUID'].decode()
+            mailbox = self.mailboxes.get(id, None)
+            if mailbox:
+                deleted.remove(id)
+            else:
+                mailbox = ImapMailbox(id=id, byimapname=self.byimapname)
+                self.byimapname[imapname] = mailbox
+                self.mailboxes[id] = mailbox
+            mailbox.update(
                 totalEmails=status[b'MESSAGES'],
                 imapname=imapname,
                 sep=sep.decode(),
@@ -182,10 +243,11 @@ class ImapDB(BaseDB):
                 uidvalidity=status[b'UIDVALIDITY'],
                 uidnext=status[b'UIDNEXT'],
                 highestmodseq=status[b'HIGHESTMODSEQ'],
-                byimapname=byimapname
             )
-        # update cache
-        self.mailboxes = {mbox['id']: mbox for mbox in byimapname.values()}
+
+        for id in deleted:
+            mailbox = self.mailboxes.pop(id)
+            # keep it in byimapname
     
 
     def mailbox_imapname(self, parentId, name):
@@ -256,6 +318,89 @@ class ImapDB(BaseDB):
         self.sync_mailboxes()
 
 
+    def as_imap_search(self, criteria):
+        operator = criteria.get('operator', None)
+        if operator:
+            conds = criteria['conds']
+            if operator == 'NOT' or operator == 'OR':
+                if len(conds) > 0:
+                    out = []
+                    if operator == 'NOT':
+                        out.append(b'NOT')
+                    for cond in conds:
+                        out.append(b'OR')
+                        out.append(self.as_imap_search(cond))
+                    # OR needs 2 args, we can delete last OR
+                    del out[-3]
+                    return b' '.join(out)
+                else:
+                    raise errors.unsupportedFilter(f"Empty filter conditions")
+            elif operator == 'AND':
+                return b' '.join([self.as_imap_search(c) for c in conds])
+            raise errors.unsupportedFilter(f"Invalid operator {operator}")
+
+        out = []
+        for crit, value in criteria.items():
+            search, func = SEARCH_MAP.get(crit, (None, None))
+            if search:
+                out.append(search)
+                out.append(func(value) if func else value)
+            elif 'deleted' == crit:
+                if not value:
+                    out.append(b'NOT')
+                out.append(b'DELETED')
+            elif 'header' == crit:
+                out.append(b'HEADER')
+                out.extend(value.encode())
+            elif 'hasAttachment' == crit:
+                if not value:
+                    out.append(b'NOT')
+                # needs Dovecot flag attachments on save
+                out.append(b'KEYWORD $HasAttachment')
+                # or out.append(b'MIMEPART (DISPOSITION TYPE attachment)')
+            elif 'inMailbox' == crit:
+                out.append(b'X-MAILBOX')
+                try:
+                    out.append(imap_utf7.encode(self.mailboxes[value]["imapname"]))
+                except KeyError:
+                    raise errors.notFound(f"Mailbox {value} not found")
+            elif 'inMailboxOtherThan' == crit:
+                try:
+                    for id in value:
+                        out.append(b'NOT X-MAILBOX')
+                        out.append(imap_utf7.encode(self.mailboxes[id]["imapname"]))
+                except KeyError:
+                    raise errors.notFound(f"Mailbox {value} not found")
+            else:
+                raise UserWarning(f'Filter {crit} not supported')
+        return b' '.join(out)
+
+def keyword2flag(kw):
+    return KEYWORD2FLAG.get(kw, kw.encode())
+
+def int2bytes(i):
+    return b'%d' % i
+
+SEARCH_MAP = {
+    'blobId': (b'X-GUID', bytes),
+    'minSize': (b'NOT SMALLER', int2bytes),
+    'maxSize': (b'NOT LARGER', int2bytes),
+    'hasKeyword': (b'KEYWORD', keyword2flag),
+    'notKeyword': (b'UNKEYWORD', keyword2flag),
+    'allInThreadHaveKeyword': (b'NOT INTHREAD UNKEYWORD', keyword2flag),
+    'someInThreadHaveKeyword': (b'INTHREAD KEYWORD', keyword2flag),
+    'noneInThreadHaveKeyword': (b'NOT INTHREAD KEYWORD', keyword2flag),
+    'before': (b'BEFORE', bytes),  # TODO: consider time, not only date
+    'after': (b'AFTER', bytes),
+    'subject': (b'SUBJECT', bytes),
+    'text': (b'TEXT', bytes),
+    'body': (b'BODY', bytes),
+    'from': (b'FROM', bytes),
+    'to': (b'TO', bytes),
+    'cc': (b'CC', bytes),
+    'bcc': (b'BCC', bytes),
+}
+
 SORT_MAP = {
     'receivedAt': 'ARRIVAL',
     'sentAt': 'DATE',
@@ -276,71 +421,6 @@ def as_imap_sort(sort):
         except KeyError:
             raise errors.unsupportedSort(f"Property {crit['property']} is not sortable")
     return criteria
-
-
-SEARCH_MAP = {
-    'blobId': 'X-GUID',
-    'minSize': 'NOT SMALLER',
-    'maxSize': 'NOT LARGER',
-    'hasKeyword': 'KEYWORD',
-    'notKeyword': 'UNKEYWORD',
-    'allInThreadHaveKeyword': 'NOT INTHREAD UNKEYWORD',
-    'someInThreadHaveKeyword': 'INTHREAD KEYWORD',
-    'noneInThreadHaveKeyword': 'NOT INTHREAD KEYWORD',
-    'before': 'BEFORE',  # TODO: consider time, not only date
-    'after': 'AFTER',
-    'subject': 'SUBJECT',
-    'text': 'TEXT',
-    'body': 'BODY',
-    'from': 'FROM',
-    'to': 'TO',
-    'cc': 'CC',
-    'bcc': 'BCC',
-}
-
-def as_imap_search(criteria):
-    operator = criteria.get('operator', None)
-    if operator:
-        conds = criteria['conds']
-        if operator == 'NOT' or operator == 'OR':
-            if len(conds) > 0:
-                out = []
-                if operator == 'NOT':
-                    out.append('NOT')
-                for cond in conds:
-                    out.append('OR')
-                    out.append(as_imap_search(cond))
-                # OR needs 2 args, we can delete last OR
-                del out[-3]
-                return ' '.join(out)
-            else:
-                raise errors.unsupportedFilter(f"Empty filter conditions")
-        elif operator == 'AND':
-            return ' '.join([as_imap_search(c) for c in conds])
-        raise errors.unsupportedFilter(f"Invalid operator {operator}")
-
-    out = []
-
-    if 'hasAttachment' in criteria:
-        if not criteria['hasAttachment']:
-            out.append('NOT')
-        # needs Dovecot flag attachments on save
-        out.append('KEYWORD $HasAttachment')
-        # or out.append('MIMEPART (DISPOSITION TYPE attachment)')
-
-    if 'header' in criteria:
-        out.append('HEADER')
-        criteria = dict(criteria)  # make a copy
-        out.extend(criteria.pop('header'))
-
-    for crit, value in criteria.items():
-        try:
-            out.append(SEARCH_MAP[crit])
-            out.append(value)
-        except KeyError:
-            raise UserWarning(f'Filter {crit} not supported')
-
-    return ' '.join(out)
 
 
 def find_type(message, part):

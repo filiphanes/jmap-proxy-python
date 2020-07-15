@@ -1,6 +1,13 @@
 class JmapError(Exception):
     "Base JMAP Exception"
 
+    def to_dict(self):
+        out = {'type': self.__class__.__name__}
+        desc = str(self)
+        if desc:
+            out['description'] = desc
+        return out
+
 class accountNotFound(JmapError):
     "The accountId does not correspond to a valid account."
 
@@ -111,3 +118,11 @@ class stateMismatch(JmapError):
 class requestTooLarge(JmapError):
     "The total number of objects to create, update, or destroy exceeds the maximum number the server is willing to process in a single method call."
 
+class blobNotFound(JmapError):
+    "At least one blob id given for an EmailBodyPart doesn’t exist. An extra notFound property of type Id[] MUST be included in the SetError object containing every blobId referenced by an EmailBodyPart that could not be found on the server."
+
+class tooManyKeywords(JmapError):
+    "The change to the Email’s keywords would exceed a server-defined maximum."
+
+class tooManyMailboxes(JmapError):
+    "The change to the set of Mailboxes that this Email is in would exceed a server-defined maximum."

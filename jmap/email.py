@@ -32,10 +32,10 @@ def api_Email_query(request, accountId, sort={}, filter={},
         raise errors.invalidArguments("anchorOffset need anchor")
 
     if collapseThreads:
-        messages = account.db.get_messages(['id','threadId'], sort=sort, **filter)
+        messages = account.db.get_messages(['id','threadId'], sort=sort, deleted=0, **filter)
         # messages = [r['id'] for r in _collapse_messages(messages)]
     else:
-        messages = account.db.get_messages('id', sort=sort, **filter)
+        messages = account.db.get_messages('id', sort=sort, deleted=0, **filter)
 
     if anchor:
         # need to calculate position
@@ -138,10 +138,10 @@ def api_Email_get(request,
         simple_props.remove('headers')
     if ids is None:
         # get all
-        messages = account.db.get_messages(simple_props)
+        messages = account.db.get_messages(simple_props, deleted=0)
     else:
         notFound = set(request.idmap(i) for i in ids)
-        messages = account.db.get_messages(simple_props, id__in=notFound)
+        messages = account.db.get_messages(simple_props, id__in=notFound, deleted=0)
 
     for msg in messages:
         if ids is not None:
@@ -196,15 +196,14 @@ def api_Email_changes(request, accountId, sinceState, maxChanges=None):
     if sinceState <= str(account.db.lowModSeq):
         raise errors.cannotCalculateChanges({'new_state': newState})
     
-    rows = account.db.dget('jmessages', {'jmodseq': ('>', sinceState)},
-                        'msgid,deleted,jcreated,jmodseq')
-    if maxChanges and len(rows) > maxChanges:
+    messages = account.db.get_messages(['id'], state__gt=sinceState)
+    if maxChanges and len(messages) > maxChanges:
         raise errors.cannotCalculateChanges({'new_state': newState})
 
     created = []
     updated = []
     removed = []
-    for msgid, deleted, jcreated in rows:
+    for msg in messages:
         if not deleted:
             if jcreated <= sinceState:
                 updated.append(msgid)
@@ -240,19 +239,23 @@ def api_Email_set(request, accountId, ifInState=None, create={}, update={}, dest
                 created[cid] = {'id': id}
                 request.setid(cid, id)
             except errors.JmapError as e:
-                notCreated[cid] = {'type': e.__class__.__name__, 'description': str(e)}
+                notCreated[cid] = e.to_dict()
 
     # UPDATE
     updated = {}
     notUpdated = {}
-    resolve_patch(request, accountId, update, api_Email_get)
+    messages = account.db.get_messages(('keywords', 'mailboxIds'), id__in=update.keys())
+    byid = {msg['id']: msg for msg in messages}
     if update:
         for id, message in update.items():
+            if id not in byid:
+                notUpdated[id] = errors.notFound().to_dict()
+                continue
             try:
-                account.db.update_message(id, **update)
+                account.db.update_message(id, ifInState, **message)
                 updated[id] = message
             except errors.JmapError as e:
-                notUpdated[id] = {'type': e.__class__.__name__, 'description': str(e)}
+                notUpdated[id] = e.to_dict()
 
     # DESTROY
     destroyed = []
@@ -263,9 +266,7 @@ def api_Email_set(request, accountId, ifInState=None, create={}, update={}, dest
                 account.db.destroy_message(id)
                 destroyed.append(id)
             except errors.JmapError as e:
-                notDestroyed[id] = {'type': e.__class__.__name__, 'description': str(e)}
-
-
+                notDestroyed[id] = errors.notFound().to_dict()
 
     for cid, msg in created.items():
         created[cid]['blobId'] = msg['id']
