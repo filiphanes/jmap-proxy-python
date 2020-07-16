@@ -114,7 +114,7 @@ def test_Email_query_inMailbox(db, user):
         assert response['position'] == 0
         # assert response['total']
         assert response['collapseThreads'] == False
-        assert int(response['queryState']) > 0
+        assert response['queryState']
         assert isinstance(response['ids'], list)
         assert len(response['ids']) > 0
         assert 'filter' in response
@@ -242,7 +242,7 @@ def test_Email_query_first_page(db, user):
         ["Email/query", {
             "accountId": user.username,
             "filter": {
-                "inMailbox": "6833392b2940de5ecddd000039771c66",  # Junk
+                "inMailbox": INBOX_ID,  # Junk
             },
             "sort": [
                 {"property": "receivedAt", "isAscending": False}
@@ -351,11 +351,14 @@ def test_Email_changes(db, user):
         # Fetch a list of created/updated/deleted Emails
         [ "Email/changes", {
             "accountId": user.username,
-            "sinceState": "1",
-            "maxChanges": 30
+            "sinceState": "1,1",
+            "maxChanges": 3000
         }, "0"],
     ]})
-    assert len(res['methodResponses']) == 2
+    assert len(res['methodResponses']) == 1
+    for method, response, tag in res['methodResponses']:
+        changes = response['created'] + response['updated'] + response['removed']
+        assert 0 < len(changes) < 3000
     assert json.dumps(res)
 
 

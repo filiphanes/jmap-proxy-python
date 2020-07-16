@@ -92,3 +92,6 @@ class ImapMailbox(dict):
             parent = self['byid'][self['parentId']]
             return parent['imapname'] + parent['sep'] + self['name']
         return self['name']
+
+    def deleted(self):
+        return False

@@ -154,32 +154,29 @@ def api_Mailbox_changes(request, accountId, sinceState, maxChanges=None, **kwarg
     new_state = account.db.highModSeqMailbox
     if sinceState <= str(account.db.lowModSeq):
         raise errors.cannotCalculateChanges({'new_state': new_state})
-    mailboxes = account.db.get_mailboxes(modseq__gt=sinceState)
+    mailboxes = account.db.get_mailboxes(updated__gt=sinceState)
 
     if maxChanges and len(mailboxes) > maxChanges:
         raise errors.cannotCalculateChanges({'new_state': new_state})
 
+    removed = []
     created = []
     updated = []
-    removed = []
-    only_counts = 0
     for mbox in mailboxes:
-        if not mbox['deleted']:
-            if mbox['created'] <= sinceState:
-                updated.append(mbox['id'])
-                if mbox['jnoncountsmodseq'] > sinceState:
-                    only_counts = 0
-            else:
-                created.append(mbox['id'])
-        else:
+        if mbox['deleted']:
+            # dont append if it was created and deleted
             if mbox['created'] <= sinceState:
                 removed.append(mbox['id'])
-            # otherwise never seen
+        elif mbox['created'] > sinceState:
+            created.append(mbox['id'])
+        else:
+            updated.append(mbox['id'])
 
     return {
         'accountId': accountId,
         'oldState': sinceState,
         'newState': new_state,
+        'hasMoreChanges': False,
         'created': created,
         'updated': updated,
         'removed': removed,

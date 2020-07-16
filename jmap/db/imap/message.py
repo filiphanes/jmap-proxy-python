@@ -15,46 +15,85 @@ KEYWORD2FLAG = {
 }
 FLAG2KEYWORD = {flag.lower(): kw for kw, flag in KEYWORD2FLAG.items()}
 
+def keyword2flag(kw):
+    return KEYWORD2FLAG.get(kw, None) or kw.encode()
+
 
 FIELDS_MAP = {
-    'blobId': 'X-GUID',  # Dovecot
-    # 'blobId': 'MESSAGEID',  # IMAP extension OBJECTID
-    'hasAttachment': 'FLAGS',
-    'headers': 'RFC822.HEADER',
-    'keywords': 'FLAGS',
-    'preview': 'PREVIEW',
-    'receivedAt': 'INTERNALDATE',
-    'size': 'RFC822.SIZE',
-    'attachments': 'RFC822',
-    'bodyStructure': 'RFC822',
-    'bodyValues': 'RFC822',
-    'textBody': 'RFC822',
-    'htmlBody': 'RFC822',
-    'subject': 'RFC822.HEADER',
-    'from': 'RFC822.HEADER',
-    'to': 'RFC822.HEADER',
-    'cc': 'RFC822.HEADER',
-    'bcc': 'RFC822.HEADER',
-    'replyTo': 'RFC822.HEADER',
-    'inReplyTo': 'RFC822.HEADER',
-    'sentAt': 'RFC822.HEADER',
-    'references': 'RFC822.HEADER',
+    'blobId':       b'X-GUID',  # Dovecot
+    # 'blobId':       b'EMAILID',  # OBJECTID imap extension
+    'hasAttachment':b'FLAGS',
+    # 'hasAttachment':b'RFC822',  # when IMAP don't set $HasAttachment flag
+    'keywords':     b'FLAGS',
+    'preview':      b'PREVIEW',
+    'receivedAt':   b'INTERNALDATE',
+    'size':         b'RFC822.SIZE',
+    'attachments':  b'RFC822',
+    'bodyStructure':b'RFC822',
+    'bodyValues':   b'RFC822',
+    'textBody':     b'RFC822',
+    'htmlBody':     b'RFC822',
+    'headers':      b'RFC822.HEADER',
+    'subject':      b'RFC822.HEADER',
+    'from':         b'RFC822.HEADER',
+    'to':           b'RFC822.HEADER',
+    'cc':           b'RFC822.HEADER',
+    'bcc':          b'RFC822.HEADER',
+    'replyTo':      b'RFC822.HEADER',
+    'inReplyTo':    b'RFC822.HEADER',
+    'sentAt':       b'RFC822.HEADER',
+    'references':   b'RFC822.HEADER',
+    'created':      b'MODSEQ',
+    'updated':      b'MODSEQ',
 }
+
+
+class EmailState:
+    __slots__ = ['uid', 'modseq']
+
+    @classmethod
+    def from_str(cls, state):
+        uid, modseq = state.split(',')
+        return cls(int(uid), int(modseq))
+
+    def __init__(self, uid, modseq):
+        self.uid = uid
+        self.modseq = modseq
+
+    def __gt__(self, value):
+        if isinstance(value, str):
+            value = EmailState.from_str(value)
+        return self.uid > value.uid or \
+            (self.uid == value.uid and \
+            self.modseq > value.modseq)
+
+    def __lte__(self, value):
+        if isinstance(value, str):
+            value = EmailState.from_str(value)
+        return self.uid <= value.uid and \
+            (self.uid == value.uid and \
+            self.modseq <= value.modseq)
+
+    def __str__(self):
+        return f"{self.uid},{self.modseq}"
 
 
 class ImapMessage(dict):
     header_re = re.compile(r'^([\w-]+)\s*:\s*(.+?)\r\n(?=[\w\r])', re.I | re.M | re.DOTALL)
 
     def __missing__(self, key):
-        self[key] = getattr(self, key)()
-        return self[key]
+        try:
+            self[key] = getattr(self, key)()
+            return self[key]
+        except TypeError:
+            raise KeyError
 
     def get_header(self, name: str):
         "Return raw value from last header instance, name needs to be lowercase."
         return self['LASTHEADERS'].get(name, None)
 
     def EML(self):
-        return email.message_from_bytes(self['RFC822'], policy=default)
+        return email.message_from_bytes(self[b'RFC822'], policy=default)
 
     def LASTHEADERS(self):
         # make headers dict with only last instance of each header
@@ -64,19 +103,19 @@ class ImapMessage(dict):
 
     def DECODEDHEADERS(self):
         try:
-            return self.pop('RFC822.HEADER').decode()
+            return self.pop(b'RFC822.HEADER').decode()
         except KeyError:
-            match = re.search(rb'\r\n\r\n', self['RFC822'])
+            match = re.search(rb'\r\n\r\n', self[b'RFC822'])
             if match:
-                return self['RFC822'][:match.end()].decode()
+                return self[b'RFC822'][:match.end()].decode()
 
 
     def blobId(self):
-        return self['X-GUID'].decode()
+        return self[b'X-GUID'].decode()
 
     def hasAttachment(self):
         # Dovecot with mail_attachment_detection_options = add-flags-on-save
-        return '$HasAttachment' in self['keywords']
+        return b'$HasAttachment' in self[b'FLAGS']
 
     def headers(self):
         return [{'name': name, 'value': value}
@@ -86,7 +125,7 @@ class ImapMessage(dict):
         return asMessageIds(self.get_header('in-reply-to'))
 
     def keywords(self):
-        return {FLAG2KEYWORD.get(f.lower(), f.decode()): True for f in self.pop('FLAGS')}
+        return {FLAG2KEYWORD.get(f.lower(), f.decode()): True for f in self[b'FLAGS']}
 
     def messageId(self):
         return asMessageIds(self.get_header('message-id'))
@@ -95,10 +134,10 @@ class ImapMessage(dict):
         return [ parse_message_id(self['id'])[0] ]
 
     def preview(self):
-        return self.pop('PREVIEW')[1].decode()
+        return self.pop(b'PREVIEW')[1].decode()
 
     def receivedAt(self):
-        return self.pop('INTERNALDATE')
+        return self.pop(b'INTERNALDATE')
 
     def references(self):
         return asMessageIds(self.get_header('references'))
@@ -111,9 +150,9 @@ class ImapMessage(dict):
 
     def size(self):
         try:
-            return self.pop('RFC822.SIZE')
+            return self.pop(b'RFC822.SIZE')
         except KeyError:
-            return len(self['RFC822'])
+            return len(self[b'RFC822'])
 
     def subject(self):
         return asText(self.get_header('subject')) or ''
@@ -148,11 +187,26 @@ class ImapMessage(dict):
         return attachments
 
     # Used when creating message
-    def getFlags(self):
-        return [KEYWORD2FLAG.get(kw.lower(), kw) for kw in self['keywords']]
+    def getFLAGS(self):
+        return [KEYWORD2FLAG.get(kw.lower(), kw.encode()) for kw in self['keywords']]
 
     def getRFC822(self):
         return make(self, {})
+    
+    def deleted(self):
+        # True is set by instantiator
+        return False
+
+    def uid(self):
+        return parse_message_id(self['id'])
+
+    def created(self):
+        "Get state when this message was created"
+        return EmailState(self['uid'], 1<<64)
+
+    def updated(self):
+        "Get state when this message was udpated"
+        return EmailState(self['uid'], self[b'MODSEQ'])
 
 
 # Define address getters

@@ -4,7 +4,7 @@ from imapclient import IMAPClient, imap_utf7
 from imapclient.exceptions import IMAPClientError
 from jmap import errors, parse
 from ..base import BaseDB
-from .message import ImapMessage, FIELDS_MAP, format_message_id, parse_message_id, KEYWORD2FLAG
+from .message import ImapMessage, EmailState, FIELDS_MAP, format_message_id, parse_message_id, keyword2flag
 from .mailbox import ImapMailbox
 
 
@@ -42,7 +42,11 @@ class ImapDB(BaseDB):
         except KeyError:
             res = self.imap.folder_status('virtual/All', [b'HIGHESTMODSEQ'])
             self.highModSeqEmail = res[b'HIGHESTMODSEQ']
-
+    
+    def get_email_state(self):
+        "Return newest state"
+        res = self.imap.folder_status('virtual/All', [b'UIDNEXT', b'HIGHESTMODSEQ'])
+        return str(EmailState(res[b'UIDNEXT'], res[b'HIGHESTMODSEQ']))
 
     def get_cached_messaged(self, properties=(), id__in=()):
         messages = []
@@ -69,7 +73,11 @@ class ImapDB(BaseDB):
         return messages, fetch_ids, fetch_props
 
 
-    def get_messages(self, properties=(), sort={}, id__in=None, threadId__in=None, state__gt=None, **criteria):
+    def get_messages(self, properties=(), sort={}, id__in=None, threadId__in=None, updated__gt=None, **criteria):
+        """
+        updated__gt: str "{uid},{modseq}"
+        criteria: dict of JMAP criteria
+        """
         # XXX: id == threadId for now
         if id__in is None and threadId__in is not None:
             id__in = [id[1:] for id in threadId__in]
@@ -80,15 +88,13 @@ class ImapDB(BaseDB):
             messages, id__in, properties = self.get_cached_messaged(properties, id__in=id__in)
 
         fetch_fields = {f for prop, f in FIELDS_MAP.items() if prop in properties}
-        if 'RFC822' in fetch_fields:
+        if b'RFC822' in fetch_fields:
             # remove redundand fields
-            fetch_fields.discard('RFC822.HEADER')
-            fetch_fields.discard('RFC822.SIZE')
+            fetch_fields.discard(b'RFC822.HEADER')
+            fetch_fields.discard(b'RFC822.SIZE')
 
-        search_criteria = self.as_imap_search(criteria)
         sort_criteria = as_imap_sort(sort) or '' if sort else None
 
-        uids = []
         if id__in is not None:
             if len(id__in) == 0:
                 return messages  # no messages matches empty ids
@@ -97,44 +103,49 @@ class ImapDB(BaseDB):
                 # useful when requested conditions can be calculated from id (threadId)
                 messages.extend(self.messages.get(id, 0) or ImapMessage(id=id) for id in id__in)
                 return messages
+            uids = []
             for id in id__in:
-                # TODO: check uidvalidity
                 try:
-                    uid = parse_message_id(id)
+                    uids.append(parse_message_id(id))
                 except ValueError:
                     # not parsable == not found
                     continue
-                uids.append(uid)
+        else:
+            uids = None
+        # now uids is None or not empty
 
-        # id__in is now None or notempty
-        uids = b','.join(b'%d'%i for i in uids) if id__in else None
-
+        search_criteria = self.as_imap_search(criteria)
         if sort_criteria:
             if uids:
-                search_criteria += b' UID %s' % uids
-            uids = self.imap.sort(sort_criteria, search_criteria)
+                search_criteria += b' UID ' + encode_seqset(uids)
+            uids = self.imap.sort(sort_criteria, bytes(search_criteria))
         elif search_criteria:
             if uids:
-                search_criteria += b' UID %s' % uids
-            uids = self.imap.search(search_criteria)
+                search_criteria += b' UID ' + encode_seqset(uids)
+            uids = self.imap.search(bytes(search_criteria))
 
-        if uids is None:
-            uids = b'1:*'
         fetch_fields.add('X-MAILBOX')
-        if state__gt:
-            fetches = self.imap.fetch(uids, fetch_fields, 'changedsince %s vanished' % state__gt)
+        if updated__gt:
+            state = EmailState.from_str(updated__gt)
+            modifiers = 'changedsince %s vanished' % state.modseq
+            if uids:
+                uids = [u for u in uids if u >= state.uid]
+            elif uids is None:
+                uids = b'%d:*' % state.uid
+            fetches = self.imap.fetch(uids, fetch_fields, modifiers)
         else:
+            if uids is None:
+                uids = b'1:*'
             fetches = self.imap.fetch(uids, fetch_fields)
 
         for uid, data in fetches.items():
             id = format_message_id(uid)
             msg = self.messages.get(id, None)
             if not msg:
-                imapname = data[b'X-MAILBOX'].decode()
+                imapname = imap_utf7.decode(data[b'X-MAILBOX'])
                 msg = ImapMessage(id=id, mailboxIds=[self.byimapname[imapname]['id']])
                 self.messages[id] = msg
-            for k, v in data.items():
-                msg[k.decode()] = v
+            msg.update(data)
             messages.append(msg)
 
         return messages
@@ -169,9 +180,9 @@ class ImapDB(BaseDB):
                 prop, key = path.split('/')
                 if prop == 'keywords':
                     if update[path]:
-                        flags_add.append(KEYWORD2FLAG.get(key, key))
+                        flags_add.append(keyword2flag(key))
                     else:
-                        flags_del.append(KEYWORD2FLAG.get(key, key))
+                        flags_del.append(keyword2flag(key))
                 elif prop == 'mailboxId':
                     if update[path]:
                         mids_add.append(key)
@@ -182,8 +193,8 @@ class ImapDB(BaseDB):
             except ValueError:
                 items = update[path].items()
                 if path == 'keywords':
-                    flags_add = [KEYWORD2FLAG.get(k, k) for k,v in items if v]
-                    flags_del = [KEYWORD2FLAG.get(k, k) for k,v in items if not v]
+                    flags_add = [keyword2flag(k) for k,v in items if v]
+                    flags_del = [keyword2flag(k) for k,v in items if not v]
                 elif path == 'mailboxIds':
                     mids_add = [k for k, v in items if v]
                     mids_del = [k for k, v in items if not v]
@@ -319,64 +330,65 @@ class ImapDB(BaseDB):
 
 
     def as_imap_search(self, criteria):
+        out = bytearray()
         operator = criteria.get('operator', None)
         if operator:
             conds = criteria['conds']
             if operator == 'NOT' or operator == 'OR':
                 if len(conds) > 0:
-                    out = []
                     if operator == 'NOT':
-                        out.append(b'NOT')
-                    for cond in conds:
-                        out.append(b'OR')
-                        out.append(self.as_imap_search(cond))
-                    # OR needs 2 args, we can delete last OR
-                    del out[-3]
-                    return b' '.join(out)
+                        out += b' NOT'
+                    lastcond = len(conds) - 1
+                    for i, cond in enumerate(conds):
+                        # OR needs 2 args, we can omit last OR
+                        if i < lastcond:
+                            out += b' OR'
+                        out += self.as_imap_search(cond)
+                    return out
                 else:
                     raise errors.unsupportedFilter(f"Empty filter conditions")
             elif operator == 'AND':
-                return b' '.join([self.as_imap_search(c) for c in conds])
+                for c in conds:
+                    out += self.as_imap_search(c)
+                return out
             raise errors.unsupportedFilter(f"Invalid operator {operator}")
 
-        out = []
         for crit, value in criteria.items():
             search, func = SEARCH_MAP.get(crit, (None, None))
             if search:
-                out.append(search)
-                out.append(func(value) if func else value)
+                out += search
+                out += func(value) if func else value
             elif 'deleted' == crit:
                 if not value:
-                    out.append(b'NOT')
-                out.append(b'DELETED')
+                    out += b' NOT'
+                out += b' DELETED'
             elif 'header' == crit:
-                out.append(b'HEADER')
-                out.extend(value.encode())
+                out += b' HEADER '
+                out += value[0].encode()
+                out += b' '
+                out += value[1].encode()
             elif 'hasAttachment' == crit:
                 if not value:
-                    out.append(b'NOT')
+                    out += b' NOT'
                 # needs Dovecot flag attachments on save
-                out.append(b'KEYWORD $HasAttachment')
-                # or out.append(b'MIMEPART (DISPOSITION TYPE attachment)')
+                out += b' KEYWORD $HasAttachment'
+                # or out += b'MIMEPART (DISPOSITION TYPE attachment)')
             elif 'inMailbox' == crit:
-                out.append(b'X-MAILBOX')
+                out += b' X-MAILBOX '
                 try:
-                    out.append(imap_utf7.encode(self.mailboxes[value]["imapname"]))
+                    out += imap_utf7.encode(self.mailboxes[value]["imapname"])
                 except KeyError:
                     raise errors.notFound(f"Mailbox {value} not found")
             elif 'inMailboxOtherThan' == crit:
                 try:
                     for id in value:
-                        out.append(b'NOT X-MAILBOX')
-                        out.append(imap_utf7.encode(self.mailboxes[id]["imapname"]))
+                        out += b' NOT X-MAILBOX '
+                        out += imap_utf7.encode(self.mailboxes[id]["imapname"])
                 except KeyError:
                     raise errors.notFound(f"Mailbox {value} not found")
             else:
                 raise UserWarning(f'Filter {crit} not supported')
-        return b' '.join(out)
-
-def keyword2flag(kw):
-    return KEYWORD2FLAG.get(kw, kw.encode())
+        return out
 
 def int2bytes(i):
     return b'%d' % i
@@ -432,3 +444,25 @@ def find_type(message, part):
         if type:
             return type
     return None
+
+
+def encode_seqset(seq):
+    "Compress sequence of intergers to bytearray for IMAP"
+    out = bytearray()
+    last = None
+    skipped = False
+    for i in sorted(seq):
+        if i - 1 == last:
+            skipped = True
+        elif last is None:
+            out += b'%d' % i
+        elif i - 1 > last:
+            if skipped:
+                out += b':%d,%d' % (last, i)
+                skipped = False
+            else:
+                out += b',%d' % (i)
+        last = i
+    if skipped:
+        out += b':%d' % last
+    return out

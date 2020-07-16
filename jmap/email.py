@@ -56,8 +56,8 @@ def api_Email_query(request, accountId, sort={}, filter={},
         'filter': filter,
         'sort': sort,
         'collapseThreads': collapseThreads,
-        'queryState': account.db.highModSeqEmail,
-        'canCalculateChanges': True,
+        'queryState': account.db.get_email_state(),
+        'canCalculateChanges': False,
         'position': start,
         'ids': [m['id'] for m in messages[start:end]],
     }
@@ -184,39 +184,40 @@ def api_Email_get(request,
     return {
         'accountId': accountId,
         'list': lst,
-        'state': account.db.highModSeqEmail,
+        'state': account.db.get_email_state(),
         'notFound': list(notFound),
     }
 
 
 def api_Email_changes(request, accountId, sinceState, maxChanges=None):
     account = request.get_account(accountId)
-    newState = account.db.highModSeqEmail
+    newState = account.db.get_email_state()
 
     if sinceState <= str(account.db.lowModSeq):
         raise errors.cannotCalculateChanges({'new_state': newState})
     
-    messages = account.db.get_messages(['id'], state__gt=sinceState)
+    messages = account.db.get_messages(['id','created','updated','deleted'], updated__gt=sinceState)
     if maxChanges and len(messages) > maxChanges:
         raise errors.cannotCalculateChanges({'new_state': newState})
 
+    removed = []
     created = []
     updated = []
-    removed = []
     for msg in messages:
-        if not deleted:
-            if jcreated <= sinceState:
-                updated.append(msgid)
-            else:
-                created.append(msgid)
-        elif jcreated <= sinceState:
-            removed.append(msgid)
-        # else never seen
-    
+        if msg['deleted']:
+            # dont append if it was created and deleted
+            if msg['created'] <= sinceState:
+                removed.append(msg['id'])
+        elif msg['created'] > sinceState:
+            created.append(msg['id'])
+        else:
+            updated.append(msg['id'])
+
     return {
         'accountId': accountId,
         'oldState': sinceState,
         'newState': newState,
+        'hasMoreChanges': False,
         'created': created,
         'updated': updated,
         'removed': removed,
@@ -225,7 +226,7 @@ def api_Email_changes(request, accountId, sinceState, maxChanges=None):
 
 def api_Email_set(request, accountId, ifInState=None, create={}, update={}, destroy=()):
     account = request.get_account(accountId)
-    oldState = account.db.highModSeqEmail
+    oldState = account.db.get_email_state()
     if ifInState is not None and ifInState != oldState:
         raise errors.stateMismatch()
 
@@ -244,7 +245,7 @@ def api_Email_set(request, accountId, ifInState=None, create={}, update={}, dest
     # UPDATE
     updated = {}
     notUpdated = {}
-    messages = account.db.get_messages(('keywords', 'mailboxIds'), id__in=update.keys())
+    messages = account.db.get_messages(('keywords', 'mailboxIds'), id__in=update.keys(), deleted=0)
     byid = {msg['id']: msg for msg in messages}
     if update:
         for id, message in update.items():
@@ -274,7 +275,7 @@ def api_Email_set(request, accountId, ifInState=None, create={}, update={}, dest
     return {
         'accountId': accountId,
         'oldState': oldState,
-        'newState': account.db.highModSeqEmail,
+        'newState': account.db.get_email_state(),
         'created': created,
         'notCreated': notCreated,
         'updated': updated,
