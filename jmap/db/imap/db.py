@@ -1,3 +1,4 @@
+from datetime import datetime
 import re
 
 from imapclient import IMAPClient, imap_utf7
@@ -12,41 +13,28 @@ class ImapDB(BaseDB):
     def __init__(self, username, password='h', host='localhost', port=143, *args, **kwargs):
         super().__init__(username, *args, **kwargs)
         self.imap = IMAPClient(host, port, use_uid=True, ssl=False)
-        res = self.imap.login(username, password)
+        self.imap.login(username, password)
         self.imap.enable("UTF8=ACCEPT")
         self.imap.enable("QRESYNC")
-        self.cursor.execute("SELECT lowModSeq,highModSeq,highModSeqMailbox,highModSeqThread,highModSeqEmail FROM account LIMIT 1")
-        row = self.cursor.fetchone()
-        self.lastfoldersync = 0
-        if row:
-            self.lowModSeq,
-            self.highModSeq,
-            self.highModSeqMailbox,
-            self.highModSeqThread,
-            self.highModSeqEmail = row
-        else:
-            self.lowModSeq = 0
-            self.highModSeq = 1
-            self.highModSeqMailbox = 1
-            self.highModSeqThread = 1
 
+        self.mailbox_state = now_state()
         self.mailboxes = {}
         self.byimapname = {}
         self.messages = {}
-        self.sync_mailboxes()
 
-        res = self.imap.select_folder('virtual/All')
-        self.selected_folder = 'virtual/All'
-        try:
-            self.highModSeqEmail = res[b'HIGHESTMODSEQ']
-        except KeyError:
-            res = self.imap.folder_status('virtual/All', [b'HIGHESTMODSEQ'])
-            self.highModSeqEmail = res[b'HIGHESTMODSEQ']
+        self.sync_mailboxes()
+        self.imap.select_folder('virtual/All')
+
     
     def get_email_state(self):
-        "Return newest state"
+        "Return newest Mailbox state"
         res = self.imap.folder_status('virtual/All', [b'UIDNEXT', b'HIGHESTMODSEQ'])
         return str(EmailState(res[b'UIDNEXT'], res[b'HIGHESTMODSEQ']))
+
+    def get_mailbox_state(self):
+        "Return newest Mailbox state"
+        res = self.sync_mailboxes()
+        return self.mailbox_state
 
     def get_cached_messaged(self, properties=(), id__in=()):
         messages = []
@@ -159,9 +147,8 @@ class ImapDB(BaseDB):
             mailboxid, = mailboxIds
         except ValueError:
             raise errors.tooManyMailboxes('Only 1 mailbox allowed in this implementation')
-        try:
-            mailbox = self.mailboxes[mailboxid]
-        except KeyError:
+        mailbox = self.mailboxes.get(mailboxid, None)
+        if not mailbox or mailbox['deleted']:
             raise errors.notFound(f"Mailbox {mailboxid} not found")
         res = self.imap.append(mailbox['imapname'], msg['RFC822'], flags=msg['flags'])
         # TODO parse res, get uid, fetch x-guid, return id
@@ -227,43 +214,70 @@ class ImapDB(BaseDB):
             raise errors.notFound()
 
 
-    def get_mailboxes(self, fields=None, **criteria):
-        self.sync_mailboxes()
-        return self.mailboxes.values()
+    def get_mailboxes(self, fields=None, updated__gt=None, deleted=None, **criteria):
+        self.sync_mailboxes(fields)
+        mailboxes = self.mailboxes.values()
 
-    def sync_mailboxes(self):
+        if deleted is not None:
+            if deleted:
+                mailboxes = (m for m in mailboxes if m['deleted'])
+            else:
+                mailboxes = (m for m in mailboxes if not m['deleted'])
+
+        if updated__gt is not None:
+            mailboxes = (m for m in mailboxes if m['updated'] > updated__gt)
+
+        return mailboxes
+
+
+    def sync_mailboxes(self, fields=None):
         # TODO: LIST "" % RETURN (STATUS (MESSAGES UIDVALIDITY HIGHESTMODSEQ X-GUID))
-        deleted = set(self.mailboxes.keys())
+        deleted_ids = set(self.mailboxes.keys())
+        if fields is None:
+            fields = {'totalEmails','unreadEmails','totalThreads','unreadThreads'}
+        new_state = now_state()
         for flags, sep, imapname in self.imap.list_folders():
             if b'\\Noselect' in flags:
                 continue
-            status = self.imap.folder_status(imapname, (['MESSAGES', 'UIDVALIDITY', 'UIDNEXT', 'HIGHESTMODSEQ', 'X-GUID']))
+            status = self.imap.folder_status(imapname, (['MESSAGES', 'UIDVALIDITY', 'UIDNEXT', 'X-GUID']))
             id = status[b'X-GUID'].decode()
             mailbox = self.mailboxes.get(id, None)
             if mailbox:
-                deleted.remove(id)
+                deleted_ids.remove(id)
             else:
-                mailbox = ImapMailbox(id=id, byimapname=self.byimapname)
+                mailbox = ImapMailbox(id=id, db=self)
                 self.byimapname[imapname] = mailbox
                 self.mailboxes[id] = mailbox
-            mailbox.update(
-                totalEmails=status[b'MESSAGES'],
-                imapname=imapname,
-                sep=sep.decode(),
-                flags=flags,
-                uidvalidity=status[b'UIDVALIDITY'],
-                uidnext=status[b'UIDNEXT'],
-                highestmodseq=status[b'HIGHESTMODSEQ'],
-            )
+            data = {
+                'totalEmails': status[b'MESSAGES'],
+                'imapname': imapname,
+                'sep': sep.decode(),
+                'flags': flags,
+                'uidvalidity': status[b'UIDVALIDITY'],
+                'uidnext': status[b'UIDNEXT'],
+            }
+            if 'unreadEmails' in fields:
+                uids = self.imap.search(b'UNSEEN UNDRAFT X-MAILBOX %s' % imap_utf7.encode(imapname))
+                data['unreadEmails'] = len(uids)
+            for key, val in data.items():
+                if mailbox[key] != val:
+                    if key not in ('totalEmails', 'unreadEmails', 'totalThreads', 'unreadThreads'):
+                        mailbox['updatedNonCounts'] = new_state
+                        if key == 'imapname':
+                            mailbox.pop('name', None)
+                            mailbox.pop('parentId', None)
+                    mailbox['updated'] = new_state
+                    mailbox[key] = val
 
-        for id in deleted:
-            mailbox = self.mailboxes.pop(id)
-            # keep it in byimapname
+        for id in deleted_ids:
+            mailbox = self.mailboxes[id]
+            if not mailbox['deleted']:
+                mailbox['deleted'] = new_state
     
 
     def mailbox_imapname(self, parentId, name):
         parent = self.mailboxes.get(parentId, None)
-        if not parent:
+        if not parent or parent['deleted']:
             raise errors.notFound('parent folder not found')
         return parent['imapname'] + parent['sep'] + name
 
@@ -292,7 +306,7 @@ class ImapDB(BaseDB):
 
     def update_mailbox(self, id, name=None, parentId=None, isSubscribed=None, sortOrder=None, **update):
         mailbox = self.mailboxes.get(id, None)
-        if not mailbox:
+        if not mailbox or mailbox['deleted']:
             raise errors.notFound('mailbox not found')
         imapname = mailbox['imapname']
 
@@ -314,14 +328,14 @@ class ImapDB(BaseDB):
                 raise errors.serverFail(res.encode())
 
         if sortOrder is not None and sortOrder != mailbox['sortOrder']:
-            # TODO: update in persistent storage
+            # TODO: store in persistent storage
             mailbox['sortOrder'] = sortOrder
         self.sync_mailboxes()
 
 
     def destroy_mailbox(self, id):
         mailbox = self.mailboxes.get(id, None)
-        if not mailbox:
+        if not mailbox or mailbox['deleted']:
             raise errors.notFound('mailbox not found')
         res = self.imap.delete_folder(mailbox['imapname'])
         if b'NO' in res or b'BAD' in res:
@@ -466,3 +480,7 @@ def encode_seqset(seq):
     if skipped:
         out += b':%d' % last
     return out
+
+
+def now_state():
+    return str(int(datetime.now().timestamp()))

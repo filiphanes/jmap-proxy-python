@@ -25,14 +25,14 @@ def api_Thread_get(request, accountId, ids: list=None):
     return {
         'accountId': accountId,
         'list': [{'id': key, 'emailIds':val} for key, val in threads.items()],
-        'state': account.db.highModSeqThread,
+        'state': account.db.get_thread_state(),
         'notFound': list(notFound),
     }
 
 
 def api_Thread_changes(request, accountId, sinceState, maxChanges=None, properties=()):
     account = request.get_account(accountId)
-    newState = account.db.highModSeqThread
+    newState = account.db.get_thread_state()
     if sinceState <= str(account.db.lowModSeq):
         raise errors.cannotCalculateChanges({'new_state': newState})
     

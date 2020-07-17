@@ -40,23 +40,27 @@ class ImapMailbox(dict):
 
     def name(self):
         try:
-            parentname, name = self['imapname'].rsplit(self['sep'], maxsplit=1)
-            return name
+            parentname, self['name'] = self['imapname'].rsplit(self['sep'], maxsplit=1)
         except ValueError:
-            return self['imapname']
+            self['name'] = self['imapname']
+        return self['name']
 
     def parentId(self):
         try:
             parentname, name = self['imapname'].rsplit(self['sep'], maxsplit=1)
-            return self['byimapname'][parentname]['id']
+            self['parentId'] = self['db'].byimapname[parentname]['id']
         except ValueError:
-            return None
+            self['parentId'] = None
+        return self['parentId']
         
     def role(self):
         for f in (F.lower() for F in self['flags']):
             if f not in KNOWN_SPECIALS:
-                return ROLE_MAP.get(f.decode(), None)
-        return ROLE_MAP.get(self['imapname'].lower(), None)
+                self['role'] = ROLE_MAP.get(f.decode(), None)
+                break
+        else:
+            self['role'] = ROLE_MAP.get(self['imapname'].lower(), None)
+        return self['role']
 
     def sortOrder(self):
         return 2 if self['role'] else (1 if self['role'] == 'inbox' else 3)
@@ -75,7 +79,7 @@ class ImapMailbox(dict):
 
     def myRights(self):
         can_select = b'\\noselect' not in self['flags']
-        return {
+        self = {
             'mayReadItems': can_select,
             'mayAddItems': can_select,
             'mayRemoveItems': can_select,
@@ -89,9 +93,18 @@ class ImapMailbox(dict):
 
     def imapname(self):
         if self['parentId']:
-            parent = self['byid'][self['parentId']]
-            return parent['imapname'] + parent['sep'] + self['name']
-        return self['name']
+            parent = self['db'].messages[self['parentId']]
+            self['imapname'] = parent['imapname'] + parent['sep'] + self['name']
+        else:
+            self['imapname'] = self['name']
+        return self['imapname']
+
+    def created(self):
+        return self['uidvalidity']
+
+    def updated(self):
+        return self['uidvalidity'] * self['uidnext']
 
     def deleted(self):
-        return False
+        return None
+

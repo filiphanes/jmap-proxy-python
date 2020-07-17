@@ -18,16 +18,16 @@ def api_Mailbox_get(request, accountId=None, ids=None, properties=None):
     https://jmap.io/spec-core.html#get
     """
     account = request.get_account(accountId)
-    mailboxes = account.db.get_mailboxes(deleted=0)
+    if properties is None:
+        properties = {'id', 'name', 'parentId', 'role', 'sortOrder', 'totalEmails',
+            'unreadEmails', 'totalThreads', 'unreadThreads', 'myRights', 'isSubscribed'}
+    mailboxes = account.db.get_mailboxes(properties, deleted=False)
 
     if ids:
         want = set(request.idmap(i) for i in ids)
     else:
         want = set(d['id'] for d in mailboxes)
 
-    if not properties:
-        properties = ('id', 'name', 'parentId', 'role', 'sortOrder', 'totalEmails',
-            'unreadEmails', 'totalThreads', 'unreadThreads', 'myRights', 'isSubscribed')
     lst = []
     for mbox in mailboxes:
         id = mbox['id']
@@ -42,7 +42,7 @@ def api_Mailbox_get(request, accountId=None, ids=None, properties=None):
 
     return {
         'accountId': accountId,
-        'state': account.db.highModSeqMailbox,
+        'state': account.db.get_mailbox_state(),
         'list': lst,
         'notFound': list(want),
     }
@@ -55,7 +55,7 @@ def api_Mailbox_set(request, accountId=None, ifInState=None, create=None, update
     """
     account = request.get_account(accountId)
     account.db.sync_mailboxes()
-    oldState = account.db.highModSeqMailbox
+    oldState = account.db.get_mailbox_state()
     if ifInState is not None and ifInState != oldState:
         raise errors.stateMismatch()
 
@@ -96,7 +96,7 @@ def api_Mailbox_set(request, accountId=None, ifInState=None, create=None, update
     return {
         'accountId': accountId,
         'oldState': oldState,
-        'newState': account.db.highModSeqMailbox,
+        'newState': account.db.get_mailbox_state(),
         'created': created,
         'notCreated': notCreated,
         'updated': updated,
@@ -112,7 +112,7 @@ def api_Mailbox_query(request, accountId=None, sort=None, filter=None, position=
     https://jmap.io/spec-core.html#get
     """
     account = request.get_account(accountId)
-    mailboxes = account.db.get_mailboxes()
+    mailboxes = account.db.get_mailboxes(deleted=False)
     if filter:
         mailboxes = [d for d in mailboxes if _mailbox_match(d, filter)]
 
@@ -137,7 +137,7 @@ def api_Mailbox_query(request, accountId=None, sort=None, filter=None, position=
         'accountId': accountId,
         'filter': filter,
         'sort': sort,
-        'queryState': account.db.highModSeqMailbox,
+        'queryState': account.db.get_mailbox_state(),
         'canCalculateChanges': False,
         'position': start,
         'total': len(data),
@@ -151,26 +151,32 @@ def api_Mailbox_changes(request, accountId, sinceState, maxChanges=None, **kwarg
     https://jmap.io/spec-core.html#querychanges
     """
     account = request.get_account(accountId)
-    new_state = account.db.highModSeqMailbox
-    if sinceState <= str(account.db.lowModSeq):
+    new_state = account.db.get_mailbox_state()
+    if sinceState <= str(account.db.low_mailbox_state):
         raise errors.cannotCalculateChanges({'new_state': new_state})
-    mailboxes = account.db.get_mailboxes(updated__gt=sinceState)
-
-    if maxChanges and len(mailboxes) > maxChanges:
-        raise errors.cannotCalculateChanges({'new_state': new_state})
+    mailboxes = account.db.get_mailboxes(['deleted', 'created', 'updated', 'updatedNonCounts'], updated__gt=sinceState)
 
     removed = []
     created = []
     updated = []
+    only_counts = True
+    changes = 0
     for mbox in mailboxes:
         if mbox['deleted']:
             # dont append if it was created and deleted
             if mbox['created'] <= sinceState:
                 removed.append(mbox['id'])
+                changes += 1
         elif mbox['created'] > sinceState:
             created.append(mbox['id'])
+            changes += 1
         else:
+            if mbox['updatedNonCounts'] > sinceState:
+                only_counts = False
             updated.append(mbox['id'])
+            changes += 1
+        if changes > maxChanges:
+            raise errors.cannotCalculateChanges({'new_state': new_state})
 
     return {
         'accountId': accountId,
