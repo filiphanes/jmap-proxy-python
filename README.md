@@ -12,5 +12,9 @@ For efficiency reasons, this initial implementation requires that all servers su
 
     uvicorn api:app --host 0.0.0.0 --port 5000 --loop uvloop --log-level info --workers 1
 
+# Required IMAP server capabilities
+
+ENABLE, SPECIAL-USE, CONDSTORE, ESEARCH, ESORT, QRESYNC, UTF8=ACCEPT, X-GUID (Dovecot)
+
 # Thanks
 https://github.com/jmapio/jmap-perl

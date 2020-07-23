@@ -1,4 +1,4 @@
-KNOWN_SPECIALS = set(b'\\HasChildren \\HasNoChildren \\NoSelect \\NoInferiors \\UnMarked'.lower().split())
+KNOWN_SPECIALS = set('\\HasChildren \\HasNoChildren \\NoSelect \\NoInferiors \\UnMarked \\Subscribed'.lower().split())
 
 # special use or name magic
 ROLE_MAP = {
@@ -35,6 +35,8 @@ ROLE_MAP = {
 
 
 class ImapMailbox(dict):
+    __slots__ = ('db',)
+
     def __missing__(self, key):
         return getattr(self, key)()
 
@@ -48,15 +50,15 @@ class ImapMailbox(dict):
     def parentId(self):
         try:
             parentname, name = self['imapname'].rsplit(self['sep'], maxsplit=1)
-            self['parentId'] = self['db'].byimapname[parentname]['id']
+            self['parentId'] = self.db.byimapname[parentname]['id']
         except ValueError:
             self['parentId'] = None
         return self['parentId']
         
     def role(self):
-        for f in (F.lower() for F in self['flags']):
+        for f in self['flags']:
             if f not in KNOWN_SPECIALS:
-                self['role'] = ROLE_MAP.get(f.decode(), None)
+                self['role'] = ROLE_MAP.get(f, None)
                 break
         else:
             self['role'] = ROLE_MAP.get(self['imapname'].lower(), None)
@@ -66,7 +68,10 @@ class ImapMailbox(dict):
         return 2 if self['role'] else (1 if self['role'] == 'inbox' else 3)
 
     def isSubscribed(self):
-        return True  # TODO: use LSUB
+        return '\\subscribed' in self['flags']
+
+    def totalEmails(self):
+        return 0
 
     def totalThreads(self):
         return self['totalEmails']
@@ -78,8 +83,8 @@ class ImapMailbox(dict):
         return self['unreadEmails']
 
     def myRights(self):
-        can_select = b'\\noselect' not in self['flags']
-        self = {
+        can_select = '\\noselect' not in self['flags']
+        self['myRights'] = {
             'mayReadItems': can_select,
             'mayAddItems': can_select,
             'mayRemoveItems': can_select,
@@ -90,10 +95,11 @@ class ImapMailbox(dict):
             'mayDelete': False if self['role'] else True,
             'maySubmit': can_select,
         }
+        return self['myRights']
 
     def imapname(self):
         if self['parentId']:
-            parent = self['db'].messages[self['parentId']]
+            parent = self.db.messages[self['parentId']]
             self['imapname'] = parent['imapname'] + parent['sep'] + self['name']
         else:
             self['imapname'] = self['name']

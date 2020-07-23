@@ -1,4 +1,5 @@
 aiofiles
+aioimaplib
 orjson
 starlette
 uvicorn

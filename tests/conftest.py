@@ -1,24 +1,34 @@
+import asyncio
+
 import pytest
 
 
-@pytest.fixture
+@pytest.fixture(scope='session')
+def event_loop():
+    loop = asyncio.get_event_loop()
+    yield loop
+    loop.close()
+
+
+@pytest.fixture(scope='module')
 def accountId():
     return 'u1'
 
 
-@pytest.fixture
+@pytest.fixture(scope='module')
+@pytest.mark.asyncio
 def db(accountId):
     from jmap.db import ImapDB
     return ImapDB(accountId)
 
 
-@pytest.fixture
-def user(accountId):
+@pytest.fixture(scope='module')
+def user(accountId, event_loop):
     from user import User
-    return User(accountId, 'h')
+    return User(accountId, 'h', loop=event_loop)
 
 
-@pytest.fixture
+@pytest.fixture(scope='module')
 def api(user):
     from jmap.api import Api
     return Api(user)

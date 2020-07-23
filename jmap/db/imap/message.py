@@ -6,12 +6,11 @@ import re
 from jmap.parse import asAddresses, asDate, asMessageIds, asText, bodystructure, htmltotext, make, parseStructure
 from jmap import errors
 
-
 KEYWORD2FLAG = {
-    '$answered': b'\\Answered',
-    '$flagged': b'\\Flagged',
-    '$draft': b'\\Draft',
-    '$seen': b'\\Seen',
+    '$answered':'\\Answered',
+    '$flagged': '\\Flagged',
+    '$draft':   '\\Draft',
+    '$seen':    '\\Seen',
 }
 FLAG2KEYWORD = {flag.lower(): kw for kw, flag in KEYWORD2FLAG.items()}
 
@@ -20,36 +19,36 @@ def keyword2flag(kw):
 
 
 FIELDS_MAP = {
-    'blobId':       b'X-GUID',  # Dovecot
-    # 'blobId':       b'EMAILID',  # OBJECTID imap extension
-    'hasAttachment':b'FLAGS',
-    # 'hasAttachment':b'RFC822',  # when IMAP don't set $HasAttachment flag
-    'keywords':     b'FLAGS',
-    'preview':      b'PREVIEW',
-    'receivedAt':   b'INTERNALDATE',
-    'size':         b'RFC822.SIZE',
-    'attachments':  b'RFC822',
-    'bodyStructure':b'RFC822',
-    'bodyValues':   b'RFC822',
-    'textBody':     b'RFC822',
-    'htmlBody':     b'RFC822',
-    'headers':      b'RFC822.HEADER',
-    'subject':      b'RFC822.HEADER',
-    'from':         b'RFC822.HEADER',
-    'to':           b'RFC822.HEADER',
-    'cc':           b'RFC822.HEADER',
-    'bcc':          b'RFC822.HEADER',
-    'replyTo':      b'RFC822.HEADER',
-    'inReplyTo':    b'RFC822.HEADER',
-    'sentAt':       b'RFC822.HEADER',
-    'references':   b'RFC822.HEADER',
-    'created':      b'MODSEQ',
-    'updated':      b'MODSEQ',
+    'blobId': 'X-GUID',  # Dovecot
+    # 'blobId':       'EMAILID',  # OBJECTID imap extension
+    'hasAttachment': 'FLAGS',
+    # 'hasAttachment':'RFC822',  # when IMAP don't set $HasAttachment flag
+    'keywords':     'FLAGS',
+    'preview':      'PREVIEW',
+    'receivedAt':   'INTERNALDATE',
+    'size':         'RFC822.SIZE',
+    'attachments':  'RFC822',
+    'bodyStructure':'RFC822',
+    'bodyValues':   'RFC822',
+    'textBody':     'RFC822',
+    'htmlBody':     'RFC822',
+    'headers':      'RFC822.HEADER',
+    'subject':      'RFC822.HEADER',
+    'from':         'RFC822.HEADER',
+    'to':           'RFC822.HEADER',
+    'cc':           'RFC822.HEADER',
+    'bcc':          'RFC822.HEADER',
+    'replyTo':      'RFC822.HEADER',
+    'inReplyTo':    'RFC822.HEADER',
+    'sentAt':       'RFC822.HEADER',
+    'references':   'RFC822.HEADER',
+    'created':      'MODSEQ',
+    'updated':      'MODSEQ',
 }
 
 
 class EmailState:
-    __slots__ = ['uid', 'modseq']
+    __slots__ = ('uid', 'modseq')
 
     @classmethod
     def from_str(cls, state):
@@ -60,19 +59,15 @@ class EmailState:
         self.uid = uid
         self.modseq = modseq
 
-    def __gt__(self, value):
-        if isinstance(value, str):
-            value = EmailState.from_str(value)
-        return self.uid > value.uid or \
-            (self.uid == value.uid and \
-            self.modseq > value.modseq)
+    def __gt__(self, other):
+        if isinstance(other, str):
+            other = EmailState.from_str(other)
+        return (self.uid, self.modseq) > (other.uid, other.modseq)
 
-    def __lte__(self, value):
-        if isinstance(value, str):
-            value = EmailState.from_str(value)
-        return self.uid <= value.uid and \
-            (self.uid == value.uid and \
-            self.modseq <= value.modseq)
+    def __le__(self, other):
+        if isinstance(other, str):
+            other = EmailState.from_str(other)
+        return (self.uid, self.modseq) <= (other.uid, other.modseq)
 
     def __str__(self):
         return f"{self.uid},{self.modseq}"
@@ -93,51 +88,50 @@ class ImapMessage(dict):
         return self['LASTHEADERS'].get(name, None)
 
     def EML(self):
-        return email.message_from_bytes(self[b'RFC822'], policy=default)
+        return email.message_from_bytes(self['RFC822'], policy=default)
 
     def LASTHEADERS(self):
         # make headers dict with only last instance of each header
         # as required by JMAP spec for single header get
         return {name.lower(): raw
-            for name, raw in self.header_re.findall(self['DECODEDHEADERS'])}
+                for name, raw in self.header_re.findall(self['DECODEDHEADERS'])}
 
     def DECODEDHEADERS(self):
         try:
-            return self.pop(b'RFC822.HEADER').decode()
+            return self.pop('RFC822.HEADER').decode()
         except KeyError:
-            match = re.search(rb'\r\n\r\n', self[b'RFC822'])
+            match = re.search(rb'\r\n\r\n', self['RFC822'])
             if match:
-                return self[b'RFC822'][:match.end()].decode()
-
+                return str(memoryview(self['RFC822'])[:match.end()])
 
     def blobId(self):
-        return self[b'X-GUID'].decode()
+        return self['X-GUID']
 
     def hasAttachment(self):
         # Dovecot with mail_attachment_detection_options = add-flags-on-save
-        return b'$HasAttachment' in self[b'FLAGS']
+        return '$HasAttachment' in self['FLAGS']
 
     def headers(self):
         return [{'name': name, 'value': value}
-            for name, value in self.header_re.findall(self['DECODEDHEADERS'])]
+                for name, value in self.header_re.findall(self['DECODEDHEADERS'])]
 
     def inReplyTo(self):
         return asMessageIds(self.get_header('in-reply-to'))
 
     def keywords(self):
-        return {FLAG2KEYWORD.get(f.lower(), f.decode()): True for f in self[b'FLAGS']}
+        return {FLAG2KEYWORD.get(f.lower(), f): True for f in self['FLAGS']}
 
     def messageId(self):
         return asMessageIds(self.get_header('message-id'))
 
     def mailboxIds(self):
-        return [ parse_message_id(self['id'])[0] ]
+        return [parse_message_id(self['id'])]
 
     def preview(self):
-        return self.pop(b'PREVIEW')[1].decode()
+        return str(self.pop('PREVIEW')[1])
 
     def receivedAt(self):
-        return self.pop(b'INTERNALDATE')
+        return self.pop('INTERNALDATE')
 
     def references(self):
         return asMessageIds(self.get_header('references'))
@@ -150,9 +144,9 @@ class ImapMessage(dict):
 
     def size(self):
         try:
-            return self.pop(b'RFC822.SIZE')
+            return self.pop('RFC822.SIZE')
         except KeyError:
-            return len(self[b'RFC822'])
+            return len(self['RFC822'])
 
     def subject(self):
         return asText(self.get_header('subject')) or ''
@@ -192,7 +186,7 @@ class ImapMessage(dict):
 
     def getRFC822(self):
         return make(self, {})
-    
+
     def deleted(self):
         # True is set by instantiator
         return False
@@ -202,11 +196,11 @@ class ImapMessage(dict):
 
     def created(self):
         "Get state when this message was created"
-        return EmailState(self['uid'], 1<<64)
+        return EmailState(self['uid'], 1 << 64)
 
     def updated(self):
         "Get state when this message was udpated"
-        return EmailState(self['uid'], self[b'MODSEQ'])
+        return EmailState(self['uid'], self['MODSEQ'])
 
 
 # Define address getters
@@ -215,6 +209,7 @@ def address_getter(field):
     def get(self):
         return asAddresses(self.get_header(field))
     return get
+
 for prop in ('from', 'to', 'cc', 'bcc', 'sender'):
     setattr(ImapMessage, prop, address_getter(prop))
 
@@ -259,7 +254,7 @@ def base_encode(n: int, b: int = 64, a=ALPHABET):
     return s
 
 ALPHABET_DICT = {c: v for v, c in enumerate(ALPHABET)}
-def base_decode(s:str, b:int=64, d=ALPHABET_DICT):
+def base_decode(s: str, b: int = 64, d=ALPHABET_DICT):
     n = 0
     for c in s:
         n = n * b + d[c]

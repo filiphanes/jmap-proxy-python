@@ -1,3 +1,4 @@
+from inspect import isawaitable
 import logging as log
 from time import monotonic
 import re
@@ -21,9 +22,10 @@ CAPABILITIES = {
     # 'urn:ietf:params:jmap:calendars': jmap.calendars,
 }
 
-def handle_request(user, data):
+
+async def handle_request(user, data):
     results = []
-    resultsByTag = {}
+    results_bytag = {}
 
     api = Api(user, data.get('createdIds', None))
     for capability in data['using']:
@@ -31,7 +33,6 @@ def handle_request(user, data):
 
     for cmd, kwargs, tag in data['methodCalls']:
         t0 = monotonic()
-        logbit = ''
         try:
             func = api.methods[cmd]
         except KeyError:
@@ -44,7 +45,7 @@ def handle_request(user, data):
             # we are updating dict over which we iterate
             # please check that your changes don't skip keys
             val = kwargs.pop(key)
-            val = _parsepath(val['path'], resultsByTag[val['resultOf']])
+            val = _parsepath(val['path'], results_bytag[val['resultOf']])
             if val is None:
                 results.append(('error',
                     {'type': 'resultReference', 'message': repr(val)}, tag))
@@ -53,34 +54,23 @@ def handle_request(user, data):
             elif not isinstance(val, list):
                 val = [val]
             kwargs[key[1:]] = val
-        if error: continue
+        if error:
+            continue
 
         try:
             result = func(api, **kwargs)
+            if isawaitable(result):
+                result = await result
             results.append((cmd, result, tag))
-            resultsByTag[tag] = result
+            results_bytag[tag] = result
         except Exception as e:
             results.append(('error', {
                 'type': e.__class__.__name__,
                 'message': str(e),
             }, tag))
             raise e
-            api.rollback()
 
-        elapsed = monotonic() - t0
-
-        # log method call
-        if kwargs.get('ids', None):
-            logbit += " [" + (",".join(kwargs['ids'][:4]))
-            if len(kwargs['ids']) > 4:
-                logbit += ", ..." + str(len(kwargs['ids']))
-            logbit += "]"
-        if kwargs.get('properties', None):
-            logbit += " (" + (",".join(kwargs['properties'][:4]))
-            if len(kwargs['properties']) > 4:
-                logbit += ", ..." + str(len(kwargs['properties']))
-            logbit += ")"
-        log.info(f'JMAP CMD {cmd}{logbit} took {elapsed}')
+        log_method_call(cmd, monotonic() - t0, kwargs)
 
     out = {
         'methodResponses': results,
@@ -132,3 +122,18 @@ def _parsepath(path, item):
         return _parsepath(path[match.end():], item[selector])
 
     return item
+
+
+def log_method_call(cmd, elapsed, kwargs):
+    logbit = ''
+    if kwargs.get('ids', None):
+        logbit += " [" + (",".join(kwargs['ids'][:4]))
+        if len(kwargs['ids']) > 4:
+            logbit += ", ..." + str(len(kwargs['ids']))
+        logbit += "]"
+    if kwargs.get('properties', None):
+        logbit += " (" + (",".join(kwargs['properties'][:4]))
+        if len(kwargs['properties']) > 4:
+            logbit += ", ..." + str(len(kwargs['properties']))
+        logbit += ")"
+    log.info(f'JMAP CMD {cmd}{logbit} took {elapsed}')

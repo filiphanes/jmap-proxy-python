@@ -8,8 +8,9 @@ INBOX_ID = "988f1121e9afae5e81cb000039771c66"
 EMAIL_ID = "100"
 
 
-def test_Mailbox_get_all(db, user):
-    res = handle_request(user, {
+@pytest.mark.asyncio
+async def test_Mailbox_get_all(user):
+    res = await handle_request(user, {
         "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
         "methodCalls": [
             ["Mailbox/get", {"accountId": user.username, "ids": None}, "0"]
@@ -39,9 +40,10 @@ def test_Mailbox_get_all(db, user):
     assert json.dumps(res)
 
 
-def test_Mailbox_create_destroy(db, user):
+@pytest.mark.asyncio
+async def test_Mailbox_create_destroy(user):
     # Create
-    res = handle_request(user, {
+    res = await handle_request(user, {
         "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
         "methodCalls": [
             ["Mailbox/set", {
@@ -67,7 +69,7 @@ def test_Mailbox_create_destroy(db, user):
         assert not response['notDestroyed']
 
     # Destroy
-    res = handle_request(user, {
+    res = await handle_request(user, {
         "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
         "methodCalls": [
             ["Mailbox/set", {
@@ -90,8 +92,9 @@ def test_Mailbox_create_destroy(db, user):
     assert json.dumps(res)
 
 
-def test_Email_query_inMailbox(db, user):
-    res = handle_request(user, {
+@pytest.mark.asyncio
+async def test_Email_query_inMailbox(user):
+    res = await handle_request(user, {
         "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
         "methodCalls": [
             ["Email/query", {
@@ -123,7 +126,8 @@ def test_Email_query_inMailbox(db, user):
     assert json.dumps(res)
 
 
-def test_Email_get(db, user):
+@pytest.mark.asyncio
+async def test_Email_get(user):
     properties = {
         'threadId', 'mailboxIds', 'inReplyTo', 'keywords', 'subject',
         'sentAt', 'receivedAt', 'size', 'blobId',
@@ -131,7 +135,7 @@ def test_Email_get(db, user):
         'attachments', 'hasAttachment',
         'headers', 'preview', 'body',
     }
-    res = handle_request(user, {
+    res = await handle_request(user, {
         "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
         "methodCalls": [
             ["Email/get", {
@@ -157,7 +161,8 @@ def test_Email_get(db, user):
     assert json.dumps(res)
 
 
-def test_Email_get_detail(db, user):
+@pytest.mark.asyncio
+async def test_Email_get_detail(user):
     properties = {
         "blobId", "messageId", "inReplyTo", "references",
         "header:list-id:asText", "header:list-post:asURLs",
@@ -168,7 +173,7 @@ def test_Email_get_detail(db, user):
         "partId", "blobId", "size", "name", "type",
         "charset", "disposition", "cid", "location",
     ]
-    res = handle_request(user, {
+    res = await handle_request(user, {
         "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
         "methodCalls": [
             ["Email/get", {
@@ -195,9 +200,10 @@ def test_Email_get_detail(db, user):
     assert json.dumps(res)
 
 
-def test_Email_set(db, user):
+@pytest.mark.asyncio
+async def test_Email_set(user):
     for state in (True, False):
-        res = handle_request(user, {
+        res = await handle_request(user, {
             "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
             "methodCalls": [
                 ["Email/set", {
@@ -230,12 +236,13 @@ def test_Email_set(db, user):
         assert json.dumps(res)
 
 
-def test_Email_query_first_page(db, user):
+@pytest.mark.asyncio
+async def test_Email_query_first_page(user):
     properties = [
         "threadId", "mailboxIds", "subject", "receivedAt",
         "keywords", "hasAttachment", "from", "to", "preview",
     ]
-    res = handle_request(user, {
+    res = await handle_request(user, {
         "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
         "methodCalls": [
         # First we do a query for the id of first 10 messages in the mailbox
@@ -302,12 +309,13 @@ def test_Email_query_first_page(db, user):
     assert json.dumps(res)
 
 
-def test_Email_query_second_page(db, user):
+@pytest.mark.asyncio
+async def test_Email_query_second_page(user):
     properties = [
         "threadId", "mailboxIds", "subject", "receivedAt",
         "keywords", "hasAttachment", "from", "to", "preview",
     ]
-    res = handle_request(user, {
+    res = await handle_request(user, {
         "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
         "methodCalls": [
         [ "Email/query", {
@@ -344,8 +352,9 @@ def test_Email_query_second_page(db, user):
     assert json.dumps(res)
 
 
-def test_Email_changes(db, user):
-    res = handle_request(user, {
+@pytest.mark.asyncio
+async def test_Email_changes(user):
+    res = await handle_request(user, {
         "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
         "methodCalls": [
         # Fetch a list of created/updated/deleted Emails
@@ -362,8 +371,9 @@ def test_Email_changes(db, user):
     assert json.dumps(res)
 
 
-def test_Thread_changes(db, user):
-    res = handle_request(user, {
+@pytest.mark.asyncio
+async def test_Thread_changes(user):
+    res = await handle_request(user, {
         "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
         "methodCalls": [
         # Fetch a list of created/udpated/deleted Threads
@@ -377,8 +387,9 @@ def test_Thread_changes(db, user):
     assert json.dumps(res)
 
 
-def test_Mailbox_changes(db, user):
-    res = handle_request(user, {
+@pytest.mark.asyncio
+async def test_Mailbox_changes(user):
+    res = await handle_request(user, {
         "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
         "methodCalls": [
         # Fetch a list of mailbox ids that have changed

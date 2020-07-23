@@ -20,7 +20,7 @@ def register_methods(api):
     })
 
 
-def api_Email_query(request, accountId, sort={}, filter={},
+async def api_Email_query(request, accountId, sort={}, filter={},
                     position=None, anchor=None, anchorOffset=None, limit:int=10000,
                     collapseThreads=False, calculateTotal=False):
     account = request.get_account(accountId)
@@ -32,10 +32,10 @@ def api_Email_query(request, accountId, sort={}, filter={},
         raise errors.invalidArguments("anchorOffset need anchor")
 
     if collapseThreads:
-        messages = account.db.get_messages(['id','threadId'], sort=sort, deleted=0, **filter)
+        messages = await account.db.get_messages(['id','threadId'], sort=sort, deleted=0, **filter)
         # messages = [r['id'] for r in _collapse_messages(messages)]
     else:
-        messages = account.db.get_messages('id', sort=sort, deleted=0, **filter)
+        messages = await account.db.get_messages('id', sort=sort, deleted=0, **filter)
 
     if anchor:
         # need to calculate position
@@ -56,7 +56,7 @@ def api_Email_query(request, accountId, sort={}, filter={},
         'filter': filter,
         'sort': sort,
         'collapseThreads': collapseThreads,
-        'queryState': account.db.get_email_state(),
+        'queryState': await account.db.email_state(),
         'canCalculateChanges': False,
         'position': start,
         'ids': [m['id'] for m in messages[start:end]],
@@ -98,7 +98,7 @@ HEADER_FORMS = {
 }
 
 
-def api_Email_get(request,
+async def api_Email_get(request,
         accountId,
         ids: list=None,
         properties=None,
@@ -138,10 +138,10 @@ def api_Email_get(request,
         simple_props.remove('headers')
     if ids is None:
         # get all
-        messages = account.db.get_messages(simple_props, deleted=0)
+        messages = await account.db.get_messages(simple_props, deleted=0)
     else:
         notFound = set(request.idmap(i) for i in ids)
-        messages = account.db.get_messages(simple_props, id__in=notFound, deleted=0)
+        messages = await account.db.get_messages(simple_props, id__in=notFound, deleted=0)
 
     for msg in messages:
         if ids is not None:
@@ -184,19 +184,19 @@ def api_Email_get(request,
     return {
         'accountId': accountId,
         'list': lst,
-        'state': account.db.get_email_state(),
+        'state': await account.db.email_state(),
         'notFound': list(notFound),
     }
 
 
-def api_Email_changes(request, accountId, sinceState, maxChanges=None):
+async def api_Email_changes(request, accountId, sinceState, maxChanges=None):
     account = request.get_account(accountId)
-    newState = account.db.get_email_state()
+    newState = await account.db.email_state()
 
-    if sinceState <= str(account.db.lowModSeq):
+    if sinceState <= await account.db.email_state_low():
         raise errors.cannotCalculateChanges({'new_state': newState})
-    
-    messages = account.db.get_messages(['id','created','updated','deleted'], updated__gt=sinceState)
+
+    messages = await account.db.get_messages(['id','created','updated','deleted'], updated__gt=sinceState)
     if maxChanges and len(messages) > maxChanges:
         raise errors.cannotCalculateChanges({'new_state': newState})
 
@@ -224,9 +224,9 @@ def api_Email_changes(request, accountId, sinceState, maxChanges=None):
     }
 
 
-def api_Email_set(request, accountId, ifInState=None, create={}, update={}, destroy=()):
+async def api_Email_set(request, accountId, ifInState=None, create={}, update={}, destroy=()):
     account = request.get_account(accountId)
-    oldState = account.db.get_email_state()
+    oldState = await account.db.email_state()
     if ifInState is not None and ifInState != oldState:
         raise errors.stateMismatch()
 
@@ -236,7 +236,7 @@ def api_Email_set(request, accountId, ifInState=None, create={}, update={}, dest
     if create:
         for cid, message in create.items():
             try:
-                id = account.db.create_message(**message)
+                id = await account.db.create_message(**message)
                 created[cid] = {'id': id}
                 request.setid(cid, id)
             except errors.JmapError as e:
@@ -245,7 +245,7 @@ def api_Email_set(request, accountId, ifInState=None, create={}, update={}, dest
     # UPDATE
     updated = {}
     notUpdated = {}
-    messages = account.db.get_messages(('keywords', 'mailboxIds'), id__in=update.keys(), deleted=0)
+    messages = await account.db.get_messages(('keywords', 'mailboxIds'), id__in=update.keys(), deleted=0)
     byid = {msg['id']: msg for msg in messages}
     if update:
         for id, message in update.items():
@@ -253,7 +253,7 @@ def api_Email_set(request, accountId, ifInState=None, create={}, update={}, dest
                 notUpdated[id] = errors.notFound().to_dict()
                 continue
             try:
-                account.db.update_message(id, ifInState, **message)
+                await account.db.update_message(id, ifInState, **message)
                 updated[id] = message
             except errors.JmapError as e:
                 notUpdated[id] = e.to_dict()
@@ -264,7 +264,7 @@ def api_Email_set(request, accountId, ifInState=None, create={}, update={}, dest
     if destroy:
         for id in destroy:
             try:
-                account.db.destroy_message(id)
+                await account.db.destroy_message(id)
                 destroyed.append(id)
             except errors.JmapError as e:
                 notDestroyed[id] = errors.notFound().to_dict()
@@ -275,7 +275,7 @@ def api_Email_set(request, accountId, ifInState=None, create={}, update={}, dest
     return {
         'accountId': accountId,
         'oldState': oldState,
-        'newState': account.db.get_email_state(),
+        'newState': await account.db.email_state(),
         'created': created,
         'notCreated': notCreated,
         'updated': updated,

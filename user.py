@@ -14,10 +14,10 @@ class User(BaseUser):
     User can have access to multiple (shared) accounts.
     User has one personal account.
     """
-    def __init__(self, username: str, password: str) -> None:
+    def __init__(self, username: str, password: str, loop=None) -> None:
         self.username = username
         self.accounts = {
-            username: ImapAccount(username, password),
+            username: ImapAccount(username, password, loop=loop),
         }
         self.sessionState = '0'
 

@@ -5,10 +5,10 @@ class Account:
 
 
 class ImapAccount(Account):
-    def __init__(self, accountId, password):
+    def __init__(self, accountId, password, loop=None):
         self.id = accountId
         self.name = accountId
-        self.db = ImapDB(accountId, password)
+        self.db = ImapDB(accountId, password, loop=loop)
         self.capabilities = {
             "urn:ietf:params:jmap:vacationresponse": {},
             "urn:ietf:params:jmap:submission": {
@@ -19,7 +19,7 @@ class ImapAccount(Account):
                 "maxSizeMailboxName": 490,
                 "maxSizeAttachmentsPerEmail": 50000000,
                 "mayCreateTopLevelMailbox": True,
-                "maxMailboxesPerEmail": 1000,
+                "maxMailboxesPerEmail": 1,  # IMAP implementation
                 "maxMailboxDepth": None,
                 "emailQuerySortOptions": [
                     "receivedAt",

@@ -12,7 +12,7 @@ def register_methods(api):
     })
 
 
-def api_Mailbox_get(request, accountId=None, ids=None, properties=None):
+async def api_Mailbox_get(request, accountId=None, ids=None, properties=None):
     """
     https://jmap.io/spec-mail.html#mailboxget
     https://jmap.io/spec-core.html#get
@@ -21,7 +21,7 @@ def api_Mailbox_get(request, accountId=None, ids=None, properties=None):
     if properties is None:
         properties = {'id', 'name', 'parentId', 'role', 'sortOrder', 'totalEmails',
             'unreadEmails', 'totalThreads', 'unreadThreads', 'myRights', 'isSubscribed'}
-    mailboxes = account.db.get_mailboxes(properties, deleted=False)
+    mailboxes = await account.db.get_mailboxes(properties, deleted=False)
 
     if ids:
         want = set(request.idmap(i) for i in ids)
@@ -42,20 +42,19 @@ def api_Mailbox_get(request, accountId=None, ids=None, properties=None):
 
     return {
         'accountId': accountId,
-        'state': account.db.get_mailbox_state(),
+        'state': await account.db.mailbox_state(),
         'list': lst,
         'notFound': list(want),
     }
 
 
-def api_Mailbox_set(request, accountId=None, ifInState=None, create=None, update=None, destroy=None, onDestroyRemoveEmails=False):
+async def api_Mailbox_set(request, accountId=None, ifInState=None, create=None, update=None, destroy=None, onDestroyRemoveEmails=False):
     """
     https://jmap.io/spec-mail.html#mailboxset
     https://jmap.io/spec-core.html#set
     """
     account = request.get_account(accountId)
-    account.db.sync_mailboxes()
-    oldState = account.db.get_mailbox_state()
+    oldState = await account.db.mailbox_state()
     if ifInState is not None and ifInState != oldState:
         raise errors.stateMismatch()
 
@@ -65,7 +64,7 @@ def api_Mailbox_set(request, accountId=None, ifInState=None, create=None, update
     if create:
         for cid, mailbox in create.items():
             try:
-                id = account.db.create_mailbox(**mailbox)
+                id = await account.db.create_mailbox(**mailbox)
                 created[cid] = {'id': id}
                 request.setid(cid, id)
             except errors.JmapError as e:
@@ -77,7 +76,7 @@ def api_Mailbox_set(request, accountId=None, ifInState=None, create=None, update
     if update:
         for id, mailbox in update.items():
             try:
-                account.db.update_mailbox(id, **mailbox)
+                await account.db.update_mailbox(id, **mailbox)
                 updated[id] = mailbox
             except errors.JmapError as e:
                 notUpdated[id] = e.to_dict()
@@ -96,7 +95,7 @@ def api_Mailbox_set(request, accountId=None, ifInState=None, create=None, update
     return {
         'accountId': accountId,
         'oldState': oldState,
-        'newState': account.db.get_mailbox_state(),
+        'newState': await account.db.mailbox_state(),
         'created': created,
         'notCreated': notCreated,
         'updated': updated,
@@ -106,7 +105,7 @@ def api_Mailbox_set(request, accountId=None, ifInState=None, create=None, update
     }
 
 
-def api_Mailbox_query(request, accountId=None, sort=None, filter=None, position=0, anchor=None, anchorOffset=0, limit=None):
+async def api_Mailbox_query(request, accountId=None, sort=None, filter=None, position=0, anchor=None, anchorOffset=0, limit=None):
     """
     https://jmap.io/spec-mail.html#mailboxquery
     https://jmap.io/spec-core.html#get
@@ -137,7 +136,7 @@ def api_Mailbox_query(request, accountId=None, sort=None, filter=None, position=
         'accountId': accountId,
         'filter': filter,
         'sort': sort,
-        'queryState': account.db.get_mailbox_state(),
+        'queryState': await account.db.mailbox_state(),
         'canCalculateChanges': False,
         'position': start,
         'total': len(data),
@@ -145,16 +144,16 @@ def api_Mailbox_query(request, accountId=None, sort=None, filter=None, position=
     }
 
 
-def api_Mailbox_changes(request, accountId, sinceState, maxChanges=None, **kwargs):
+async def api_Mailbox_changes(request, accountId, sinceState, maxChanges=None, **kwargs):
     """
     https://jmap.io/spec-mail.html#mailboxquerychanges
     https://jmap.io/spec-core.html#querychanges
     """
     account = request.get_account(accountId)
-    new_state = account.db.get_mailbox_state()
-    if sinceState <= str(account.db.low_mailbox_state):
+    new_state = await account.db.mailbox_state()
+    if sinceState <= await account.db.mailbox_state_low():
         raise errors.cannotCalculateChanges({'new_state': new_state})
-    mailboxes = account.db.get_mailboxes(['deleted', 'created', 'updated', 'updatedNonCounts'], updated__gt=sinceState)
+    mailboxes = await account.db.get_mailboxes(['deleted', 'created', 'updated', 'updatedNonCounts'], updated__gt=sinceState)
 
     removed = []
     created = []

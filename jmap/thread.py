@@ -1,5 +1,6 @@
-from jmap import errors
 from collections import defaultdict
+
+from jmap import errors
 
 
 def register_methods(api):
@@ -8,15 +9,15 @@ def register_methods(api):
     #TODO: api.methods['Thread/queryChanges'] = api_Thread_queryChanges
 
 
-def api_Thread_get(request, accountId, ids: list=None):
+async def api_Thread_get(request, accountId, ids: list=None):
     account = request.get_account(accountId)
     threads = defaultdict(list)
     if ids is None:
         # get all
-        messages = account.db.get_messages('id', deleted=0)
+        messages = await account.db.get_messages('id', deleted=0)
     else:
         notFound = set(request.idmap(id) for id in ids)
-        messages = account.db.get_messages(['id'], threadId__in=notFound, deleted=0)
+        messages = await account.db.get_messages(['id'], threadId__in=notFound, deleted=0)
     for msg in messages:
         threads[msg['threadId']].append(msg['id'])
         if ids is not None:
@@ -24,20 +25,19 @@ def api_Thread_get(request, accountId, ids: list=None):
 
     return {
         'accountId': accountId,
-        'list': [{'id': key, 'emailIds':val} for key, val in threads.items()],
-        'state': account.db.get_thread_state(),
+        'list': [{'id': key, 'emailIds': val} for key, val in threads.items()],
+        'state': await account.db.thread_state(),
         'notFound': list(notFound),
     }
 
 
-def api_Thread_changes(request, accountId, sinceState, maxChanges=None, properties=()):
+async def api_Thread_changes(request, accountId, sinceState, maxChanges=None, properties=()):
     account = request.get_account(accountId)
-    newState = account.db.get_thread_state()
-    if sinceState <= str(account.db.lowModSeq):
+    newState = await account.db.thread_state()
+    if sinceState <= account.db.thread_state_low():
         raise errors.cannotCalculateChanges({'new_state': newState})
     
-    rows = account.db.dget('jthreads', {'jmodseq': ('>', sinceState)},
-                        'thrid,deleted,jcreated')
+    rows = account.db.threads_get(['id','create','deleted'], updated__gt=sinceState)
     if maxChanges and len(rows) > maxChanges:
         raise errors.cannotCalculateChanges({'new_state': newState})
     
