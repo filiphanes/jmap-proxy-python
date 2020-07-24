@@ -145,7 +145,11 @@ async def api_Email_get(request,
 
     for msg in messages:
         if ids is not None:
-            notFound.remove(msg['id'])
+            try:
+                notFound.remove(msg['id'])
+            except KeyError:
+                print(f"Got msg {msg['id']}, but not requested")
+                raise
         # Fill most of msg properties except header:*
         data = {prop: msg[prop] for prop in simple_props}
         data['id'] = msg['id']

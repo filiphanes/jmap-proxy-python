@@ -32,7 +32,7 @@ async def handle_request(user, data):
         CAPABILITIES[capability].register_methods(api)
 
     for cmd, kwargs, tag in data['methodCalls']:
-        t0 = monotonic()
+        t0 = monotonic() * 1000
         try:
             func = api.methods[cmd]
         except KeyError:
@@ -69,8 +69,8 @@ async def handle_request(user, data):
                 'message': str(e),
             }, tag))
             raise e
-
-        log_method_call(cmd, monotonic() - t0, kwargs)
+        finally:
+            log_method_call(cmd, monotonic() * 1000 - t0, kwargs)
 
     out = {
         'methodResponses': results,
@@ -124,16 +124,16 @@ def _parsepath(path, item):
     return item
 
 
-def log_method_call(cmd, elapsed, kwargs):
+def log_method_call(cmd, elapsed: float, kwargs):
     logbit = ''
     if kwargs.get('ids', None):
-        logbit += " [" + (",".join(kwargs['ids'][:4]))
-        if len(kwargs['ids']) > 4:
+        logbit += " [" + (",".join(kwargs['ids'][:10]))
+        if len(kwargs['ids']) > 10:
             logbit += ", ..." + str(len(kwargs['ids']))
         logbit += "]"
     if kwargs.get('properties', None):
-        logbit += " (" + (",".join(kwargs['properties'][:4]))
-        if len(kwargs['properties']) > 4:
+        logbit += " (" + (",".join(kwargs['properties'][:10]))
+        if len(kwargs['properties']) > 10:
             logbit += ", ..." + str(len(kwargs['properties']))
         logbit += ")"
-    log.info(f'JMAP CMD {cmd}{logbit} took {elapsed}')
+    log.info(f'JMAP CMD {cmd}{logbit} {elapsed:0.3f} ms')

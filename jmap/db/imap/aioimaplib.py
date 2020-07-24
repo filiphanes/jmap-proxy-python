@@ -16,21 +16,26 @@
 #    You should have received a copy of the GNU General Public License
 #    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 import asyncio
+import functools
 import logging
+import random
+import re
 import ssl
+import time
 from asyncio import set_event_loop
+from collections import namedtuple
 from copy import copy
 from datetime import datetime, timezone, timedelta
-import time
 from enum import Enum
 
-import re
-
-import functools
-
-import random
-from collections import namedtuple
-
+try:
+    from asyncio import get_running_loop
+except ImportError:
+    def get_running_loop() -> asyncio.AbstractEventLoop:
+        loop = asyncio.get_event_loop()
+        if not loop.is_running():
+            raise RuntimeError("no running event loop")
+        return loop
 
 # to avoid imap servers to kill the connection after 30mn idling
 # cf https://www.imapwiki.org/ClientImplementation/Synchronization
@@ -146,7 +151,7 @@ class Command(object):
         self.tag = tag
         self.args = args
         self.by_uid = by_uid
-        if not untagged_name:
+        if untagged_name is None:
             self.untagged_names = (name,)
         elif isinstance(untagged_name, str):
             self.untagged_names = (untagged_name,)
@@ -155,7 +160,7 @@ class Command(object):
 
         self.response = None
         self._exception = None
-        self._loop = loop if loop is not None else asyncio.get_running_loop()
+        self._loop = loop if loop is not None else get_running_loop()
         self._event = asyncio.Event()
         self._timeout = timeout
         self._timer = asyncio.Handle(lambda: None, None, self._loop)  # fake timer
@@ -183,7 +188,7 @@ class Command(object):
 
     def begin_literal_data(self, expected_size, literal_data=b''):
         self._expected_size = expected_size
-        self._literal_data = b''
+        self._literal_data = bytearray()
         return self.append_literal_data(literal_data)
 
     def wait_literal_data(self):
@@ -201,10 +206,10 @@ class Command(object):
         self._reset_timer()
         return data[nb_bytes_to_add:]
 
-    def append_to_resp(self, line, result=None):
+    def append_to_resp(self, line, result='Pending'):
         try:
             self.response.lines.append(line)
-            if result is not None:
+            if result != self.response.result:
                 self.response = Response(result, self.response.lines)
         except AttributeError:
             self.response = Response(result, [line])
@@ -250,13 +255,16 @@ class FetchCommand(Command):
     def wait_data(self):
         if self.response is None:
             return False
-        opened_parens = 0
-        for line in reversed(self.response.lines):
-            if isinstance(line, str):
-                opened_parens += line.count('(') - line.count(')')
-                if self.FETCH_MESSAGE_DATA_RE.match(line):
-                    break
-        return opened_parens
+        last_line = self.response.lines[-1]
+        return not isinstance(last_line, str) or last_line[-1] != ')'
+        # parens counting fails when quoted string contains unmatched parens
+        # opened_parens = 0
+        # for line in reversed(self.response.lines):
+        #     if isinstance(line, str):
+        #         opened_parens += line.count('(') - line.count(')')
+        #         if self.FETCH_MESSAGE_DATA_RE.match(line):
+        #             break
+        # return opened_parens > 0
 
 
 class IdleCommand(Command):
@@ -393,7 +401,7 @@ class IMAP4ClientProtocol(asyncio.Protocol):
     def _handle_line(self, line, current_cmd):
         if not line:
             return
-        elif self.state == CONNECTED:
+        if self.state == CONNECTED:
             asyncio.ensure_future(self.welcome(line))
         elif tagged_status_response_re.match(line):
             self._response_done(line)
@@ -470,7 +478,7 @@ class IMAP4ClientProtocol(asyncio.Protocol):
 
     @change_state
     async def logout(self):
-        response = (await self.execute(Command('LOGOUT', self.new_tag(), loop=self.loop)))
+        response = await self.execute(Command('LOGOUT', self.new_tag(), loop=self.loop))
         if 'OK' == response.result:
             self.state = LOGOUT
         return response
@@ -516,6 +524,20 @@ class IMAP4ClientProtocol(asyncio.Protocol):
                     self.new_tag(),
                     *criteria,
                     untagged_name='ESEARCH' if ret else 'SEARCH',
+                    by_uid=by_uid,
+                    loop=self.loop,
+                    timeout=timeout,
+                    ))
+
+    async def thread(self, algorithm, *criteria, charset='UTF-8', by_uid=False, timeout=None):
+        if 'THREAD='+algorithm.upper() not in self.capabilities:
+            raise Abort('server has not THREAD=%s capability' % algorithm.upper())
+        return await self.execute(
+            Command('THREAD',
+                    self.new_tag(),
+                    algorithm,
+                    charset,
+                    *criteria,
                     by_uid=by_uid,
                     loop=self.loop,
                     timeout=timeout,
@@ -620,12 +642,14 @@ class IMAP4ClientProtocol(asyncio.Protocol):
 
     async def list(self, reference_name='""', mailbox_pattern='*', ret=None, timeout=None):
         args = [reference_name, mailbox_pattern]
+        untagged_name = None
         if ret:
-            ret = ret.upper()
             args.append('RETURN (%s)' % ret)
+            if 'STATUS' in ret.upper():
+                untagged_name = ('LIST', 'STATUS')
         return await self.execute(
             Command('LIST', self.new_tag(), *args,
-                    untagged_name=('LIST', 'STATUS') if 'STATUS' in ret else None,
+                    untagged_name=untagged_name,
                     timeout=timeout))
 
     async def simple_command(self, name, *args):
@@ -641,7 +665,7 @@ class IMAP4ClientProtocol(asyncio.Protocol):
             await self.state_condition.wait_for(lambda: self.state in states)
 
     def _untagged_response(self, line):
-        line = line[2:]
+        line = line[2:]  # remove '* '
         if self.pending_sync_command is not None:
             self.pending_sync_command.append_to_resp(line)
             command = self.pending_sync_command
@@ -678,7 +702,7 @@ class IMAP4ClientProtocol(asyncio.Protocol):
             if len(cmds) == 0:
                 raise Abort('unexpected tagged (%s) response: %s' % (tag, response))
             elif len(cmds) > 1 and cmds[0] is not cmds[1]:
-                # LIST-STATUS is 2 times in pending_async_commands
+                # LIST-STATUS and FETCH VANISHED is 2 times in pending_async_commands
                 raise Error('inconsistent state : two commands have the same tag (%s)' % cmds)
             command = cmds.pop()
             for untagged_name in command.untagged_names:
@@ -722,23 +746,20 @@ class IMAP4(object):
         self.ssl_context = ssl_context
         self.protocol = None
         self._idle_waiter = None
+        self.create_client(host, port, self.loop, conn_lost_cb, ssl_context)
 
-    async def create_client(self):
-        def factory():
-            return IMAP4ClientProtocol(self.loop, self.conn_lost_cb)
-        _, self.protocol = await self.loop.create_connection(
-            factory, self.host, self.port, ssl=self.ssl_context)
+    def create_client(self, host, port, loop, conn_lost_cb=None, ssl_context=None):
+        local_loop = loop if loop is not None else get_running_loop()
+        self.protocol = IMAP4ClientProtocol(local_loop, conn_lost_cb)
+        local_loop.create_task(local_loop.create_connection(lambda: self.protocol, host, port, ssl=ssl_context))
 
     def get_state(self):
-        return self.protocol.state
+        return self.protocol and self.protocol.state
 
     async def wait_hello_from_server(self):
         await asyncio.wait_for(self.protocol.wait({AUTH, NONAUTH}), self.timeout)
 
     async def login(self, user, password):
-        if self.protocol is None:
-            await self.create_client()
-            await self.wait_hello_from_server()
         return await asyncio.wait_for(self.protocol.login(user, password), self.timeout)
 
     async def logout(self):
@@ -748,16 +769,22 @@ class IMAP4(object):
     async def select(self, mailbox='INBOX'):
         return await asyncio.wait_for(self.protocol.select(mailbox), self.timeout)
 
-    async def search(self, *criteria, charset='utf-8', ret=None):
+    async def search(self, *criteria, charset='UTF-8', ret=None):
         return await self.protocol.search(*criteria, charset=charset, ret=ret, timeout=self.timeout)
 
-    async def uid_search(self, *criteria, charset='utf-8', ret=None):
+    async def uid_search(self, *criteria, charset='UTF-8', ret=None):
         return await self.protocol.search(*criteria, by_uid=True, charset=charset, ret=ret, timeout=self.timeout)
 
-    async def sort(self, search, sort='ALL', charset='utf-8', ret=None):
+    async def thread(self, algorithm='REFERENCES', search='ALL', charset='UTF-8'):
+        return await self.protocol.thread(algorithm, search, charset=charset, timeout=self.timeout)
+
+    async def uid_thread(self, algorithm='REFERENCES', search='ALL', charset='UTF-8'):
+        return await self.protocol.thread(algorithm, search, charset=charset, by_uid=True, timeout=self.timeout)
+
+    async def sort(self, search, sort='ALL', charset='UTF-8', ret=None):
         return await self.protocol.sort(search, sort, charset=charset, ret=ret, timeout=self.timeout)
 
-    async def uid_sort(self, search, sort='ALL', charset='utf-8', ret=None):
+    async def uid_sort(self, search, sort='ALL', charset='UTF-8', ret=None):
         return await self.protocol.sort(search, sort, by_uid=True, charset=charset, ret=ret, timeout=self.timeout)
 
     async def uid(self, command, *criteria):
@@ -957,21 +984,24 @@ def iter_messageset(s):
             yield i
 
 
-fetch_re = re.compile(r'([0-9]+) FETCH \((.*)')
-fetch_tokens_re = re.compile(r'''
-    ( # brackets
-    [()]
-    | # quoted value
-    \".*?[^\\]\"  # might fail when string ends with \\
-    | # other value without space
-    [^()\s]+
-    )''', re.VERBOSE)
-def parsed_fetch(lines):
+def parse_thread(lines):
+    """Iterates over thread lines
+    yields recursive lists
+    Need only lines without last line 'Thread completed...'
+    """
+    parser = ResponseParser()
+    for line in lines:
+        if parser.feed(line):
+            yield parser.values()[1:]
+            parser = ResponseParser()
+
+
+def parse_fetch(lines):
     """Iterates over fetch lines
     yields dicts
-    Need only FETCH lines without last line 'Fetch completed...'
+    Need only lines without last line 'Fetch completed...'
     """
-    parser = FetchParser()
+    parser = ResponseParser()
     for line in lines:
         if parser.feed(line):
             try:
@@ -979,31 +1009,40 @@ def parsed_fetch(lines):
             except ValueError:
                 print(parser.values())
             yield seq, {vv[i]: vv[i+1] for i in range(0, len(vv), 2)}
-            parser = FetchParser()
+            parser = ResponseParser()
 
-class FetchParser:
-    __slots__ = 'tokens', 'expecting_literal'
+
+response_atoms_re = re.compile(r'''
+    ( # brackets
+    [()]
+    | # quoted
+    \".*?[^\\](?:(?:\\\\)+)?\"
+    | # other value without space
+    [^()\s]+
+    )''', re.VERBOSE)
+class ResponseParser:
+    __slots__ = 'atoms', 'expecting_raw'
 
     def __init__(self):
-        self.tokens = []
-        self.expecting_literal = False
+        self.atoms = []
+        self.expecting_raw = False
 
     def feed(self, line):
-        if self.expecting_literal:
-            self.tokens[-1] = line
-            self.expecting_literal = False
+        if self.expecting_raw:
+            self.atoms[-1] = line
+            self.expecting_raw = False
             return False
-        tokens = fetch_tokens_re.findall(line)
-        self.tokens.extend(tokens)
-        if tokens[-1][-1] == '}':
-            self.expecting_literal = True
+        atoms = response_atoms_re.findall(line)
+        self.atoms.extend(atoms)
+        if atoms[-1][-1] == '}':
+            self.expecting_raw = True
             return False
         return True
 
     def list_from(self, i):
         values = []
-        while i < len(self.tokens):
-            value = self.tokens[i]
+        while i < len(self.atoms):
+            value = self.atoms[i]
             if value == '(':
                 value, i = self.list_from(i+1)
             elif value == ')':
@@ -1017,19 +1056,25 @@ class FetchParser:
         return values
 
 
-
 list_re = re.compile(r'\(([^)]*)\) ([^ ]+) (.+)')
-def parsed_list(lines):
-    "Iterate over list lines and yields tuples (flags:set, sep, name)"
+def parse_list(lines):
+    """
+    Iterate over list lines
+    yields tuples (flags:set, sep:str, name:str)
+    """
     for line in lines:
         match = list_re.match(line)
         if match:
             flags, sep, name = match.group(1, 2, 3)
             yield set(flags.split()), unquoted(sep), name
 
+
 status_re = re.compile(r'(.+) \(([^)]*)\)')
-def parsed_status(lines):
-    "Iterate over status lines and yields dicts"
+def parse_status(lines):
+    """
+    Iterate over status lines
+    yields dicts
+    """
     for line in lines:
         match = status_re.match(line)
         if match:
@@ -1037,8 +1082,12 @@ def parsed_status(lines):
             return {ss[i]: ss[i + 1] for i in range(0, len(ss), 2)}
     return {}
 
-def parsed_list_status(lines):
-    "Iterate over list lines and yields tuples (flags:set, sep, name, status:dict)"
+
+def parse_list_status(lines):
+    """
+    Iterate over list lines
+    yields tuples (flags:set, sep, name, status:dict)
+    """
     mailboxes = {}
     for line in lines:
         match = list_re.match(line)
@@ -1058,11 +1107,12 @@ def parsed_list_status(lines):
     return mailboxes.values()
 
 
-
 esearch_re = re.compile(r'\(TAG "([^"]+)"\)(?:\s+UID)?\s+(.+)\s*')
-def parsed_esearch(lines):
-    """Parses first esearch line
-    returns dict or empty dict"""
+def parse_esearch(lines):
+    """
+    Parses first esearch line
+    returns dict or empty dict
+    """
     for line in lines:
         match = esearch_re.match(line)
         if match:
@@ -1070,4 +1120,30 @@ def parsed_esearch(lines):
             return {dd[i]: dd[i+1] for i in range(0, len(dd), 2)}
     return {}
 
-parsed_esort = parsed_esearch
+
+def format_messageset(ints) -> str:
+    "Sorts and compresses sequence of integers to str in IMAP message set format"
+    return encode_messageset(ints).decode()
+
+
+def encode_messageset(ints) -> bytearray:
+    """Sorts and compresses sequence of integers
+    returns bytearray in IMAP message set format"""
+    out = bytearray()
+    last = None
+    skipped = False
+    for i in sorted(ints):
+        if i - 1 == last:
+            skipped = True
+        elif last is None:
+            out += b'%d' % i
+        elif i - 1 > last:
+            if skipped:
+                out += b':%d,%d' % (last, i)
+                skipped = False
+            else:
+                out += b',%d' % (i)
+        last = i
+    if skipped:
+        out += b':%d' % last
+    return out

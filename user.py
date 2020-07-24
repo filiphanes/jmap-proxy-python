@@ -14,12 +14,15 @@ class User(BaseUser):
     User can have access to multiple (shared) accounts.
     User has one personal account.
     """
-    def __init__(self, username: str, password: str, loop=None) -> None:
+    @classmethod
+    async def init(cls, username: str, password: str, loop=None) -> None:
+        self = cls()
         self.username = username
         self.accounts = {
-            username: ImapAccount(username, password, loop=loop),
+            username: await ImapAccount.init(username, password, loop=loop),
         }
         self.sessionState = '0'
+        return self
 
     @property
     def is_authenticated(self) -> bool:
@@ -48,6 +51,6 @@ class BasicAuthBackend(AuthenticationBackend):
 
         if decoded not in self.users:
             username, _, password = decoded.partition(":")
-            self.users[decoded] = User(username, password)
+            self.users[decoded] = await User.init(username, password)
 
         return AuthCredentials(["authenticated"]), self.users[decoded]

@@ -36,7 +36,7 @@ async def api(request):
             "status": 400,
             "detail": "The content of the request did not parse as JSON."
         }, 400)
-    res = handle_request(request.user, data)
+    res = await handle_request(request.user, data)
     return JSONResponse(res)
 
 

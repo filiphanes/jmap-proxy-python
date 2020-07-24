@@ -3,8 +3,8 @@ from datetime import datetime
 import re
 
 from jmap import errors
-from .aioimaplib import IMAP4, parsed_list_status, parsed_esearch, parsed_status, parsed_fetch, iter_messageset, \
-    parsed_esort, AioImapException
+from .aioimaplib import IMAP4, parse_list_status, parse_esearch, parse_status, parse_fetch, iter_messageset, \
+    AioImapException, encode_messageset
 from .imap_utf7 import imap_utf7_encode, imap_utf7_decode
 from .message import ImapMessage, EmailState, FIELDS_MAP, format_message_id, parse_message_id, keyword2flag
 from .mailbox import ImapMailbox
@@ -20,7 +20,9 @@ class ImapDB:
     ...
     raises JMAP errors
     """
-    def __init__(self, username, password='h', host='localhost', port=143, loop=None):
+    @classmethod
+    async def init(cls, username, password='h', host='localhost', port=143, loop=None):
+        self = cls()
         self.username = username
         self.password = password
         self._mailbox_state = now_state()
@@ -30,20 +32,18 @@ class ImapDB:
         self.messages = {}
         self.loop = loop or asyncio.get_running_loop()
         self.imap = IMAP4(host, port, loop=self.loop, timeout=600)
-        # wait for login
-        self.loop.run_until_complete(self._ainit())
-
-    async def _ainit(self):
+        await self.imap.wait_hello_from_server()
         await self.imap.login(self.username, self.password)
-        await self.imap.enable("UTF8=ACCEPT")
-        await self.imap.enable("QRESYNC")
-        await self.imap.select('virtual/All')
-        await self.sync_mailboxes()
+        await self.imap.enable("UTF8=ACCEPT"),
+        await self.imap.enable("QRESYNC"),
+        await self.imap.select('virtual/All'),
+        await self.sync_mailboxes(),
+        return self
 
     async def email_state(self):
         "Return current Mailbox state"
         ok, lines = await self.imap.status('virtual/All', '(UIDNEXT HIGHESTMODSEQ)')
-        status = parsed_status(lines)
+        status = parse_status(lines)
         return str(EmailState(int(status['UIDNEXT']), int(status['HIGHESTMODSEQ'])))
 
     async def email_state_low(self):
@@ -51,7 +51,7 @@ class ImapDB:
 
     async def mailbox_state(self):
         "Return current Mailbox state"
-        res = await self.sync_mailboxes()
+        await self.sync_mailboxes()
         return self._mailbox_state
 
     async def mailbox_state_low(self):
@@ -129,14 +129,14 @@ class ImapDB:
         search_criteria = self.as_imap_search(criteria)
         if sort_criteria:
             if uids:
-                search_criteria += b' UID ' + encode_seqset(uids)
+                search_criteria += b' UID ' + encode_messageset(uids)
             ok, lines = await self.imap.uid_sort(sort_criteria.decode(), search_criteria.decode(), ret='ALL')
-            uids = parsed_esearch(lines)['ALL']
+            uids = parse_esearch(lines)['ALL']
         elif search_criteria:
             if uids:
-                search_criteria += b' UID ' + encode_seqset(uids)
+                search_criteria += b' UID ' + encode_messageset(uids)
             ok, lines = await self.imap.uid_search(search_criteria.decode(), ret='ALL')
-            uids = parsed_esearch(lines)['ALL']
+            uids = parse_esearch(lines)['ALL']
 
         # optimization: don't fetch X-MAILBOX when we filter by mailbox
         inMailbox = criteria.get('inMailbox', None)
@@ -167,7 +167,7 @@ class ImapDB:
                     id = format_message_id(uid)
                     messages.append(ImapMessage(id=id, deleted=True))
                 lines = lines[1:]
-            for seq, data in parsed_fetch(lines[:-1]):
+            for seq, data in parse_fetch(lines[:-1]):
                 id = format_message_id(data['UID'])
                 msg = self.messages.get(id, None)
                 if not msg:
@@ -287,7 +287,7 @@ class ImapDB:
             fields = {'totalEmails','unreadEmails','totalThreads','unreadThreads'}
         new_state = now_state()
         ok, lines = await self.imap.list(ret='SPECIAL-USE SUBSCRIBED STATUS (MESSAGES X-GUID)')
-        for flags, sep, imapname, status in parsed_list_status(lines):
+        for flags, sep, imapname, status in parse_list_status(lines):
             flags = set(f.lower() for f in flags)
             if '\\noselect' in flags:
                 continue
@@ -309,7 +309,7 @@ class ImapDB:
             if 'unreadEmails' in fields:
                 # TODO: run all esearches concurrently
                 ok, lines = await self.imap.uid_search('UNSEEN UNDRAFT X-MAILBOX %s' % imapname, ret='COUNT')
-                search = parsed_esearch(lines)
+                search = parse_esearch(lines)
                 data['unreadEmails'] = int(search['COUNT'])
 
             # set updated state
@@ -518,28 +518,6 @@ def find_type(message, part):
         if type:
             return type
     return None
-
-
-def encode_seqset(seq):
-    "Compress sequence of intergers to bytearray for IMAP"
-    out = bytearray()
-    last = None
-    skipped = False
-    for i in sorted(seq):
-        if i - 1 == last:
-            skipped = True
-        elif last is None:
-            out += b'%d' % i
-        elif i - 1 > last:
-            if skipped:
-                out += b':%d,%d' % (last, i)
-                skipped = False
-            else:
-                out += b',%d' % (i)
-        last = i
-    if skipped:
-        out += b':%d' % last
-    return out
 
 
 def now_state():

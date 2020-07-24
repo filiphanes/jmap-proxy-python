@@ -3,6 +3,7 @@ import email
 from email.policy import default
 import re
 
+from jmap.db.imap.aioimaplib import unquoted
 from jmap.parse import asAddresses, asDate, asMessageIds, asText, bodystructure, htmltotext, make, parseStructure
 from jmap import errors
 
@@ -128,10 +129,14 @@ class ImapMessage(dict):
         return [parse_message_id(self['id'])]
 
     def preview(self):
-        return str(self.pop('PREVIEW')[1])
+        preview = self.pop('PREVIEW')[1]
+        if isinstance(preview, str):
+            return unquoted(preview)
+        else:
+            return preview.decode()
 
     def receivedAt(self):
-        return self.pop('INTERNALDATE')
+        return asDate(unquoted(self.pop('INTERNALDATE')))
 
     def references(self):
         return asMessageIds(self.get_header('references'))

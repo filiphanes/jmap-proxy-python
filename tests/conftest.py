@@ -17,15 +17,16 @@ def accountId():
 
 @pytest.fixture(scope='module')
 @pytest.mark.asyncio
-def db(accountId):
+async def db(accountId):
     from jmap.db import ImapDB
-    return ImapDB(accountId)
+    return await ImapDB.init(accountId)
 
 
 @pytest.fixture(scope='module')
-def user(accountId, event_loop):
+@pytest.mark.asyncio
+async def user(accountId, event_loop):
     from user import User
-    return User(accountId, 'h', loop=event_loop)
+    return await User.init(accountId, 'h', loop=event_loop)
 
 
 @pytest.fixture(scope='module')

@@ -10,8 +10,8 @@ def test_encode_seqset():
     assert encode_seqset([5,6,7,8,3,2,11,12,13]) == b'2:3,5:8,11:13'
 
 
-def test_init():
+async def test_init():
     username = 'u1'
-    db = ImapDB(username)
+    db = await ImapDB.init(username)
     assert db.accountid == username
 
