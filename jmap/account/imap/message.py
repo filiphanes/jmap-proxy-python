@@ -3,7 +3,7 @@ import email
 from email.policy import default
 import re
 
-from jmap.db.imap.aioimaplib import unquoted
+from .aioimaplib import unquoted
 from jmap.parse import asAddresses, asDate, asMessageIds, asText, bodystructure, htmltotext, make, parseStructure
 from jmap import errors
 
@@ -17,35 +17,6 @@ FLAG2KEYWORD = {flag.lower(): kw for kw, flag in KEYWORD2FLAG.items()}
 
 def keyword2flag(kw):
     return KEYWORD2FLAG.get(kw, None) or kw.encode()
-
-
-FIELDS_MAP = {
-    'blobId': 'X-GUID',  # Dovecot
-    # 'blobId':       'EMAILID',  # OBJECTID imap extension
-    'hasAttachment': 'FLAGS',
-    # 'hasAttachment':'RFC822',  # when IMAP don't set $HasAttachment flag
-    'keywords':     'FLAGS',
-    'preview':      'PREVIEW',
-    'receivedAt':   'INTERNALDATE',
-    'size':         'RFC822.SIZE',
-    'attachments':  'RFC822',
-    'bodyStructure':'RFC822',
-    'bodyValues':   'RFC822',
-    'textBody':     'RFC822',
-    'htmlBody':     'RFC822',
-    'headers':      'RFC822.HEADER',
-    'subject':      'RFC822.HEADER',
-    'from':         'RFC822.HEADER',
-    'to':           'RFC822.HEADER',
-    'cc':           'RFC822.HEADER',
-    'bcc':          'RFC822.HEADER',
-    'replyTo':      'RFC822.HEADER',
-    'inReplyTo':    'RFC822.HEADER',
-    'sentAt':       'RFC822.HEADER',
-    'references':   'RFC822.HEADER',
-    'created':      'MODSEQ',
-    'updated':      'MODSEQ',
-}
 
 
 class EmailState:
@@ -74,7 +45,7 @@ class EmailState:
         return f"{self.uid},{self.modseq}"
 
 
-class ImapMessage(dict):
+class ImapEmail(dict):
     header_re = re.compile(r'^([\w-]+)\s*:\s*(.+?)\r\n(?=[\w\r])', re.I | re.M | re.DOTALL)
 
     def __missing__(self, key):
@@ -83,6 +54,8 @@ class ImapMessage(dict):
             return self[key]
         except TypeError:
             raise KeyError
+        except AttributeError:
+            raise
 
     def get_header(self, name: str):
         "Return raw value from last header instance, name needs to be lowercase."
@@ -106,7 +79,7 @@ class ImapMessage(dict):
                 return str(memoryview(self['RFC822'])[:match.end()])
 
     def blobId(self):
-        return self['X-GUID']
+        return self['EMAILID']
 
     def hasAttachment(self):
         # Dovecot with mail_attachment_detection_options = add-flags-on-save
@@ -216,7 +189,7 @@ def address_getter(field):
     return get
 
 for prop in ('from', 'to', 'cc', 'bcc', 'sender'):
-    setattr(ImapMessage, prop, address_getter(prop))
+    setattr(ImapEmail, prop, address_getter(prop))
 
 
 def format_message_id(uid):

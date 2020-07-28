@@ -99,7 +99,7 @@ class ImapMailbox(dict):
 
     def imapname(self):
         if self['parentId']:
-            parent = self.db.messages[self['parentId']]
+            parent = self.db.mailboxes[self['parentId']]
             self['imapname'] = parent['imapname'] + parent['sep'] + self['name']
         else:
             self['imapname'] = self['name']

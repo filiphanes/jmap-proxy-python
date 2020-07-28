@@ -1,11 +1,16 @@
-def register_methods(api):
-    api.methods['Core/echo'] = api_Core_echo
-    api.methods['Blob/copy'] = api_Blob_copy
+from jmap import errors
+
+
+def register_methods(methods):
+    methods['Core/echo'] = api_Core_echo
+    methods['Blob/copy'] = api_Blob_copy
+
+MAX_OBJECTS_IN_GET = 1000
 
 capabilityValue = {
     "collationAlgorithms": [],
     "maxCallsInRequest": 64,
-    "maxObjectsInGet": 1000,
+    "maxObjectsInGet": MAX_OBJECTS_IN_GET,
     "maxSizeUpload": 250000000,
     "maxConcurrentRequests": 10,
     "maxObjectsInSet": 1000,
@@ -13,16 +18,19 @@ capabilityValue = {
     "maxSizeRequest": 10000000
 }
 
+
 def api_Core_echo(request, **kwargs):
     return kwargs
 
+
 def api_Blob_copy(request, fromAccountId, accountId, blobIds):
-    raise NotImplementedError()
+    fromAccount = request.get_account(fromAccountId)
+    account = request.get_account(accountId)
     return {
         'fromAccountId': fromAccountId,
         'accountId': accountId,
-        'copied': [],
-        'notCopied': [],
+        'copied': None,
+        'notCopied': {id: errors.serverFail('Blob/copy not implemented') for id in blobIds},
     }
 
 

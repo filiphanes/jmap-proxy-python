@@ -1,4 +1,3 @@
-from datetime import datetime
 import email
 from email.header import decode_header, make_header
 from email.message import EmailMessage
@@ -39,7 +38,6 @@ def asRaw(raw):
 
 def asText(raw):
     return raw and str(make_header(decode_header(raw))).strip()
-
 
 
 def parse(rfc822, id=None):

@@ -3,10 +3,10 @@ import os
 
 try:
     import orjson as json
-    dumps_kw = {'option': json.OPT_INDENT_2}
+    dumps_options = {'option': json.OPT_INDENT_2}
 except ImportError:
     import json
-    dumps_kw = {}
+    dumps_options = {}
 
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
@@ -24,7 +24,7 @@ class JSONResponse(Response):
     media_type = "application/json"
 
     def render(self, content) -> bytes:
-        return json.dumps(content, **dumps_kw)
+        return json.dumps(content, **dumps_options)
 
 
 async def api(request):
@@ -47,6 +47,7 @@ async def event_stream(request, types, closeafter, ping):
         if ping:
             yield 'event: ping\ndata: {"interval":%d}\n\n' % ping
         await asyncio.sleep(ping or 10)
+
 
 async def event(request):
     try:
@@ -72,7 +73,6 @@ async def event(request):
     )
 
 
-
 BASEURL = os.getenv('BASEURL', 'http://127.0.0.1:8888')
 async def well_known_jmap(request):
     res = {
@@ -88,9 +88,9 @@ async def well_known_jmap(request):
             } for account in request.user.accounts.values()
         },
         "primaryAccounts": {
+            "urn:ietf:params:jmap:mail": request.user.username,
             "urn:ietf:params:jmap:submission": request.user.username,
             "urn:ietf:params:jmap:vacationresponse": request.user.username,
-            "urn:ietf:params:jmap:mail": request.user.username
         },
         "state": "0",
         "apiUrl": BASEURL + "/api/",
@@ -102,10 +102,10 @@ async def well_known_jmap(request):
 
 
 routes = [
-    Route('/api/', api, methods=["GET", "POST"]),
+    Route('/api/', api, methods=["POST", "GET"]),
     Route('/event/', event),
     Route('/.well-known/jmap', well_known_jmap),
-    Mount('/', StaticFiles(directory="web", html=True)),
+    # Mount('/', StaticFiles(directory="web", html=True)),
 ]
 
 middleware = [

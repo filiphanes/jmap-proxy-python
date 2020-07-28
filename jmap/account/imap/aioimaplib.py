@@ -256,7 +256,8 @@ class FetchCommand(Command):
         if self.response is None:
             return False
         last_line = self.response.lines[-1]
-        return not isinstance(last_line, str) or last_line[-1] != ')'
+        return not isinstance(last_line, str) or \
+               not (last_line.endswith(')') or last_line.startswith('(EARLIER)'))
         # parens counting fails when quoted string contains unmatched parens
         # opened_parens = 0
         # for line in reversed(self.response.lines):
@@ -586,7 +587,9 @@ class IMAP4ClientProtocol(asyncio.Protocol):
             if 'UIDPLUS' not in self.capabilities:
                 raise Abort('EXPUNGE with uids is only valid with UIDPLUS capability. UIDPLUS not in (%s)' % self.capabilities)
         elif command not in {'fetch', 'store', 'copy', 'move', 'search', 'sort'}:
-            raise Abort(f'command UID only possible with COPY, FETCH, COPY, MOVE, SEARCH, SORT, EXPUNGE (w/UIDPLUS) or STORE (was {command.upper()})')
+            raise Abort('command UID only possible with COPY, FETCH, COPY,'
+                        ' MOVE, SEARCH, SORT, EXPUNGE (w/UIDPLUS) or STORE'
+                        ' (was %s)' % (command.upper(),))
         return await getattr(self, command)(*criteria, by_uid=True, timeout=timeout)
 
     async def copy(self, *args, by_uid=False, timeout=None):
@@ -607,7 +610,7 @@ class IMAP4ClientProtocol(asyncio.Protocol):
         self.update_capabilities(response.lines[0])
 
     def update_capabilities(self, string):
-        self.capabilities.update(string.strip().upper().split())
+        self.capabilities = set(string.strip().upper().split())
         for version in AllowedVersions:
             if version in self.capabilities:
                 self.imap_version = version
@@ -992,8 +995,7 @@ def parse_thread(lines):
     parser = ResponseParser()
     for line in lines:
         if parser.feed(line):
-            yield parser.values()[1:]
-            parser = ResponseParser()
+            return parser.values()[1:]
 
 
 def parse_fetch(lines):
@@ -1016,7 +1018,7 @@ response_atoms_re = re.compile(r'''
     ( # brackets
     [()]
     | # quoted
-    \".*?[^\\](?:(?:\\\\)+)?\"
+    \"(?:|.*?[^\\](?:(?:\\\\)+)?)\"
     | # other value without space
     [^()\s]+
     )''', re.VERBOSE)
@@ -1069,7 +1071,7 @@ def parse_list(lines):
             yield set(flags.split()), unquoted(sep), name
 
 
-status_re = re.compile(r'(.+) \(([^)]*)\)')
+status_re = re.compile(r'(\S+|\".*?[^\\](?:(?:\\\\)+)?\")\s+\((.*)\)')
 def parse_status(lines):
     """
     Iterate over status lines

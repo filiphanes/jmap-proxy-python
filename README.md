@@ -14,7 +14,7 @@ For efficiency reasons, this initial implementation requires that all servers su
 
 # Required IMAP server capabilities
 
-ENABLE, SPECIAL-USE, CONDSTORE, ESEARCH, ESORT, QRESYNC, UTF8=ACCEPT, X-GUID (Dovecot)
+ENABLE, SPECIAL-USE, CONDSTORE, ESEARCH, ESORT, QRESYNC, UTF8=ACCEPT, OBJECTID
 
 # Thanks
 https://github.com/jmapio/jmap-perl

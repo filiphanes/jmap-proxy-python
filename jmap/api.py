@@ -8,19 +8,19 @@ import jmap.core as core
 import jmap.mail as mail
 import jmap.submission as submission
 import jmap.vacationresponse as vacationresponse
-import jmap.contacts as contacts
-import jmap.calendars as calendars
 from jmap import errors
 
 
 CAPABILITIES = {
     'urn:ietf:params:jmap:core': core,
     'urn:ietf:params:jmap:mail': mail,
-    # 'urn:ietf:params:jmap:submission': jmap.submission,
-    # 'urn:ietf:params:jmap:vacationresponse': jmap.vacationresponse,
-    # 'urn:ietf:params:jmap:contacts': jmap.contacts,
-    # 'urn:ietf:params:jmap:calendars': jmap.calendars,
+    'urn:ietf:params:jmap:submission': submission,
+    'urn:ietf:params:jmap:vacationresponse': vacationresponse,
 }
+
+METHODS = {}
+for module in CAPABILITIES.values():
+    module.register_methods(METHODS)
 
 
 async def handle_request(user, data):
@@ -28,13 +28,11 @@ async def handle_request(user, data):
     results_bytag = {}
 
     api = Api(user, data.get('createdIds', None))
-    for capability in data['using']:
-        CAPABILITIES[capability].register_methods(api)
 
-    for cmd, kwargs, tag in data['methodCalls']:
+    for method_name, kwargs, tag in data['methodCalls']:
         t0 = monotonic() * 1000
         try:
-            func = api.methods[cmd]
+            method = METHODS[method_name]
         except KeyError:
             results.append(('error', {'error': 'unknownMethod'}, tag))
             continue
@@ -58,10 +56,10 @@ async def handle_request(user, data):
             continue
 
         try:
-            result = func(api, **kwargs)
+            result = method(api, **kwargs)
             if isawaitable(result):
                 result = await result
-            results.append((cmd, result, tag))
+            results.append((method_name, result, tag))
             results_bytag[tag] = result
         except Exception as e:
             results.append(('error', {
@@ -70,7 +68,7 @@ async def handle_request(user, data):
             }, tag))
             raise e
         finally:
-            log_method_call(cmd, monotonic() * 1000 - t0, kwargs)
+            log_method_call(method_name, monotonic() * 1000 - t0, kwargs)
 
     out = {
         'methodResponses': results,
@@ -84,7 +82,7 @@ async def handle_request(user, data):
 class Api:
     def __init__(self, user, idmap=None):
         self.user = user
-        self._idmap = idmap or {}
+        self.idmap = IdMap(idmap or {})
         self.methods = {}
     
     def get_account(self, accountId) -> ImapAccount:
@@ -92,12 +90,17 @@ class Api:
             return self.user.accounts[accountId]
         except KeyError:
             raise errors.accountNotFound()
-    
-    def setid(self, key, val):
-        self._idmap[f'#{key}'] = val
 
-    def idmap(self, key):
-        return self._idmap.get(key, key)
+
+class IdMap(dict):
+    def __missing__(self, key):
+        return key
+
+    def get(self, key):
+        return self[key]
+
+    def set(self, key, value):
+        self[f"#{key}"] = value
 
 
 def _parsepath(path, item):
@@ -124,7 +127,7 @@ def _parsepath(path, item):
     return item
 
 
-def log_method_call(cmd, elapsed: float, kwargs):
+def log_method_call(method_name, elapsed: float, kwargs):
     logbit = ''
     if kwargs.get('ids', None):
         logbit += " [" + (",".join(kwargs['ids'][:10]))
@@ -136,4 +139,4 @@ def log_method_call(cmd, elapsed: float, kwargs):
         if len(kwargs['properties']) > 10:
             logbit += ", ..." + str(len(kwargs['properties']))
         logbit += ")"
-    log.info(f'JMAP CMD {cmd}{logbit} {elapsed:0.3f} ms')
+    log.info(f'JMAP CMD {method_name}{logbit} {elapsed:0.3f} ms')

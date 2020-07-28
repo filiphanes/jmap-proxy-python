@@ -1,9 +1,9 @@
 capabilityValue = {}
 
 
-def register_methods(api):
-    api.methods['VacationResponse/get'] = api_VacationResponse_get
-    api.methods['VacationResponse/set'] = api_VacationResponse_set
+def register_methods(methods):
+    methods['VacationResponse/get'] = api_VacationResponse_get
+    methods['VacationResponse/set'] = api_VacationResponse_set
 
 
 def api_VacationResponse_get(request, accountId, **kwargs):

@@ -3,8 +3,8 @@ from jmap import errors
 capabilityValue = {}
 
 
-def register_methods(api):
-    api.methods.update({
+def register_methods(methods):
+    methods.update({
         #TODO: 'EmailSubmission/get': api_EmailSubmission_get,
         #TODO: 'EmailSubmission/changes': api_EmailSubmission_changes,
         #TODO: 'EmailSubmission/queryChanges': api_EmailSubmission_queryChanges,

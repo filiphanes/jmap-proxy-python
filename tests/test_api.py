@@ -162,6 +162,68 @@ async def test_Email_get(user):
 
 
 @pytest.mark.asyncio
+async def test_Email_query_get_threads(user):
+    properties = ["threadId","mailboxIds","keywords",
+                  "hasAttachment","from","to","subject",
+                  "receivedAt","size","preview"]
+    res = await handle_request(user, {
+        "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail", "urn:ietf:params:jmap:submission",
+                  "urn:ietf:params:jmap:vacationresponse"],
+        "methodCalls": [
+            ["Email/query", {
+                "accountId": user.username,
+                "filter": {"inMailbox": INBOX_ID},
+                "sort": [{"property": "receivedAt", "isAscending": False}],
+                "collapseThreads": True,
+                "position": 0,
+                "limit": 30,
+                "calculateTotal": True},
+             "0"],
+            ["Email/get", {
+                 "accountId": user.username,
+                 "#ids": {"resultOf": "0", "name": "Email/query", "path": "/ids"},
+                 "properties": ["threadId"]},
+             "1"],
+            ["Thread/get", {
+                "accountId": user.username,
+                "#ids": {"resultOf": "1", "name": "Email/get", "path": "/list/*/threadId"}},
+             "2"],
+            ["Email/get", {
+                "accountId": user.username,
+                "#ids": {"resultOf": "2", "name": "Thread/get", "path": "/list/*/emailIds"},
+                "properties": properties},
+             "3"]]})
+    assert len(res['methodResponses']) == 4
+    for method, response, tag in res['methodResponses']:
+        if tag == "0":
+            assert method == "Email/query"
+        if tag == "1":
+            assert method == "Email/get"
+            assert isinstance(response['notFound'], list)
+            assert len(response['notFound']) == 0
+            assert isinstance(response['list'], list)
+            assert len(response['list']) == 30
+            for msg in response['list']:
+                assert msg['id']
+                assert msg['threadId']
+        elif tag == "2":
+            assert method == "Thread/get"
+            assert len(response['notFound']) == 0
+            assert len(response['list']) == 30
+            for msg in response['list']:
+                assert msg['id']
+                assert msg['emailIds']
+        elif tag == "3":
+            assert method == "Email/get"
+            assert len(response['notFound']) == 0
+            assert len(response['list']) == 30
+            for msg in response['list']:
+                for prop in properties:
+                    assert prop in msg
+    assert json.dumps(res)
+
+
+@pytest.mark.asyncio
 async def test_Email_get_detail(user):
     properties = {
         "blobId", "messageId", "inReplyTo", "references",
@@ -376,10 +438,10 @@ async def test_Thread_changes(user):
     res = await handle_request(user, {
         "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
         "methodCalls": [
-        # Fetch a list of created/udpated/deleted Threads
+        # Fetch a list of created/updated/deleted Threads
         [ "Thread/changes", {
             "accountId": user.username,
-            "sinceState": "1",
+            "sinceState": "1,39",
             "maxChanges": 30
         }, "0"],
     ]})
