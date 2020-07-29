@@ -1,3 +1,5 @@
+from jmap.account.imap.imap_utf7 import imap_utf7_decode, imap_utf7_encode
+
 KNOWN_SPECIALS = set('\\HasChildren \\HasNoChildren \\NoSelect \\NoInferiors \\UnMarked \\Subscribed'.lower().split())
 
 # special use or name magic
@@ -42,9 +44,10 @@ class ImapMailbox(dict):
 
     def name(self):
         try:
-            parentname, self['name'] = self['imapname'].rsplit(self['sep'], maxsplit=1)
+            parentname, name = self['imapname'].rsplit(self['sep'], maxsplit=1)
         except ValueError:
-            self['name'] = self['imapname']
+            name = self['imapname']
+        self['name'] = imap_utf7_decode(name.encode())
         return self['name']
 
     def parentId(self):
@@ -98,11 +101,12 @@ class ImapMailbox(dict):
         return self['myRights']
 
     def imapname(self):
+        encname = imap_utf7_encode(self['name']).decode()
         if self['parentId']:
             parent = self.db.mailboxes[self['parentId']]
-            self['imapname'] = parent['imapname'] + parent['sep'] + self['name']
+            self['imapname'] = parent['imapname'] + parent['sep'] + encname
         else:
-            self['imapname'] = self['name']
+            self['imapname'] = encname
         return self['imapname']
 
     def created(self):

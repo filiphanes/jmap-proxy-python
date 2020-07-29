@@ -18,8 +18,9 @@ def asGroupedAddresses(raw):
     # TODO
     return raw and [{'name': asText(n), 'email': e} for n, e in AddressList(raw).addresslist]
 
+messageid_re = re.compile(r'<("[^>]+?"|[^>]+?)>')
 def asMessageIds(raw):
-    return raw and [v.strip('<>') for v in asCommaList(raw)]
+    return raw and messageid_re.findall(raw)
 
 def asCommaList(raw):
     return raw and re.split(r'\s*,\s*', raw.strip())

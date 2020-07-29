@@ -980,22 +980,19 @@ def iter_messageset(s):
     yields integers in given order without sorting
     does not remove duplicates
     example: "1,3:5,1:2" -> 1,3,4,5,1,2
+    raises ValueError if
     """
     for pair in s.split(','):
         start, _, end = pair.partition(':')
-        for i in range(int(start), int(end or start)+1):
+        for i in range(int(start or 1), int(end or start or 0)+1):
             yield i
 
-
+thread_atom_re = re.compile(r'([()]|[0-9]+)')
 def parse_thread(lines):
-    """Iterates over thread lines
-    yields recursive lists
-    Need only lines without last line 'Thread completed...'
-    """
-    parser = ResponseParser()
+    """returns list of ints|lists from first thread line"""
     for line in lines:
-        if parser.feed(line):
-            return parser.values()[1:]
+        atoms = thread_atom_re.findall(line)
+        return nest_atoms(atoms)[0]
 
 
 def parse_fetch(lines):
@@ -1014,16 +1011,17 @@ def parse_fetch(lines):
             parser = ResponseParser()
 
 
-response_atoms_re = re.compile(r'''
-    ( # brackets
-    [()]
-    | # quoted
-    \"(?:|.*?[^\\](?:(?:\\\\)+)?)\"
-    | # other value without space
-    [^()\s]+
-    )''', re.VERBOSE)
 class ResponseParser:
     __slots__ = 'atoms', 'expecting_raw'
+
+    atom_re = re.compile(r'''
+        ( # brackets
+        [()]
+        | # quoted
+        \"(?:|.*?[^\\](?:(?:\\\\)+)?)\"
+        | # other value without space
+        [^()\s]+
+        )''', re.VERBOSE)
 
     def __init__(self):
         self.atoms = []
@@ -1034,28 +1032,28 @@ class ResponseParser:
             self.atoms[-1] = line
             self.expecting_raw = False
             return False
-        atoms = response_atoms_re.findall(line)
+        atoms = self.atom_re.findall(line)
         self.atoms.extend(atoms)
         if atoms[-1][-1] == '}':
             self.expecting_raw = True
             return False
         return True
 
-    def list_from(self, i):
-        values = []
-        while i < len(self.atoms):
-            value = self.atoms[i]
-            if value == '(':
-                value, i = self.list_from(i+1)
-            elif value == ')':
-                return values, i
-            values.append(value)
-            i += 1
-        return values, i
-
     def values(self):
-        values, i = self.list_from(0)
+        values, i = nest_atoms(self.atoms)
         return values
+
+def nest_atoms(atoms, i=0):
+    values = []
+    while i < len(atoms):
+        value = atoms[i]
+        if value == '(':
+            value, i = nest_atoms(atoms, i+1)
+        elif value == ')':
+            return values, i
+        values.append(value)
+        i += 1
+    return values, i
 
 
 list_re = re.compile(r'\(([^)]*)\) ([^ ]+) (.+)')
@@ -1109,7 +1107,7 @@ def parse_list_status(lines):
     return mailboxes.values()
 
 
-esearch_re = re.compile(r'\(TAG "([^"]+)"\)(?:\s+UID)?\s+(.+)\s*')
+esearch_re = re.compile(r'\(TAG "([^"]+)"\)(?: UID)?\s*(.*)')
 def parse_esearch(lines):
     """
     Parses first esearch line

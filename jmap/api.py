@@ -61,6 +61,8 @@ async def handle_request(user, data):
                 result = await result
             results.append((method_name, result, tag))
             results_bytag[tag] = result
+        except errors.JmapError as e:
+            results.append(e.as_dict())
         except Exception as e:
             results.append(('error', {
                 'type': e.__class__.__name__,

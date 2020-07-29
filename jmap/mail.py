@@ -49,7 +49,7 @@ def api_Mailbox_changes(request, accountId, **kwargs):
     return request.get_account(accountId).mailbox_changes(**kwargs)
 
 def api_Mailbox_queryChanges(request, accountId, **kwargs):
-    return request.get_account(accountId).mailbox_queryChanges(**kwargs)
+    return request.get_account(accountId).mailbox_query_changes(**kwargs)
 
 def api_Thread_get(request, accountId, **kwargs):
     return request.get_account(accountId).thread_get(request.idmap, **kwargs)
