@@ -76,11 +76,11 @@ class ImapMailbox(dict):
     def totalEmails(self):
         return 0
 
-    def totalThreads(self):
-        return self['totalEmails']
-
     def unreadEmails(self):
         return 0
+
+    def totalThreads(self):
+        return self['totalEmails']
 
     def unreadThreads(self):
         return self['unreadEmails']

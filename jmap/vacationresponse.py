@@ -1,4 +1,4 @@
-capabilityValue = {}
+capability = {}
 
 
 def register_methods(methods):

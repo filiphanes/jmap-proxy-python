@@ -1,11 +1,9 @@
 import binascii
 
-from starlette.authentication import (
-    AuthenticationBackend, AuthenticationError, BaseUser,
-    UnauthenticatedUser, AuthCredentials
-)
+from starlette.authentication import AuthenticationBackend, AuthenticationError, BaseUser, AuthCredentials
 
-from jmap.account import ImapAccount
+from jmap import errors
+from jmap.account import UserAccount
 
 
 class User(BaseUser):
@@ -14,15 +12,25 @@ class User(BaseUser):
     User can have access to multiple (shared) accounts.
     User has one personal account.
     """
-    @classmethod
-    async def init(cls, username: str, password: str, loop=None) -> None:
-        self = cls()
+    def __init__(self, username: str, password: str, loop=None) -> None:
         self.username = username
         self.accounts = {
-            username: await ImapAccount.init(username, password, loop=loop),
+            username: UserAccount(username, password, loop=loop),
         }
         self.sessionState = '0'
-        return self
+
+    async def ainit(self):
+        for account in self.accounts.values():
+            try:
+                await account.ainit()
+            except AttributeError:
+                continue
+
+    def get_account(self, accountId):
+        try:
+            return self.accounts[accountId]
+        except KeyError:
+            raise errors.accountNotFound()
 
     @property
     def is_authenticated(self) -> bool:
@@ -51,6 +59,8 @@ class BasicAuthBackend(AuthenticationBackend):
 
         if decoded not in self.users:
             username, _, password = decoded.partition(":")
-            self.users[decoded] = await User.init(username, password)
+            user = User(username, password)
+            await user.ainit()
+            self.users[decoded] = user
 
         return AuthCredentials(["authenticated"]), self.users[decoded]

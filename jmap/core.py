@@ -7,7 +7,7 @@ def register_methods(methods):
 
 MAX_OBJECTS_IN_GET = 1000
 
-capabilityValue = {
+capability = {
     "collationAlgorithms": [],
     "maxCallsInRequest": 64,
     "maxObjectsInGet": MAX_OBJECTS_IN_GET,
@@ -24,8 +24,8 @@ def api_Core_echo(request, **kwargs):
 
 
 def api_Blob_copy(request, fromAccountId, accountId, blobIds):
-    fromAccount = request.get_account(fromAccountId)
-    account = request.get_account(accountId)
+    fromAccount = request['user'].get_account(fromAccountId)
+    account = request['user'].get_account(accountId)
     return {
         'fromAccountId': fromAccountId,
         'accountId': accountId,

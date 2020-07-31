@@ -1,5 +1,7 @@
 aiofiles
+aiohttp
 aioimaplib
+aiosmtplib
 orjson
 starlette
 uvicorn

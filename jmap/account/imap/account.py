@@ -1,13 +1,13 @@
 import asyncio
+import itertools
 from datetime import datetime
 import re
 
 from jmap import errors
-from jmap.account import PersonalAccount
 from jmap.core import MAX_OBJECTS_IN_GET
 from jmap.parse import asAddresses, asDate, asGroupedAddresses, asMessageIds, asRaw, asText, asURLs, htmltotext
 from .aioimaplib import IMAP4, parse_list_status, parse_esearch, parse_status, parse_fetch, iter_messageset, \
-    AioImapException, encode_messageset, parse_thread, unquoted, quoted
+    encode_messageset, parse_thread, unquoted, quoted
 from .message import ImapEmail, EmailState, format_message_id, parse_message_id, keyword2flag
 from .mailbox import ImapMailbox
 
@@ -79,22 +79,10 @@ HEADER_FORMS = {
     'MessageIds': asMessageIds,
 }
 
-class ImapAccount(PersonalAccount):
+class ImapAccount:
     """
     JMAP Account which uses IMAP as backend
     """
-
-    @classmethod
-    async def init(cls, *args, **kwargs):
-        """Asynchronously initializes this class"""
-        self = cls(*args, **kwargs)
-        await self.imap.wait_hello_from_server()
-        await self.imap.login(self.username, self.password)
-        await self.imap.enable("UTF8=ACCEPT")
-        await self.imap.enable("QRESYNC")
-        await self.imap.select('virtual/All')
-        await self.sync_mailboxes()
-        return self
 
     def __init__(self, username, password='h', host='localhost', port=143, loop=None):
         self.id = username
@@ -127,9 +115,18 @@ class ImapAccount(PersonalAccount):
         self._mailbox_state_low = self._mailbox_state
         self.mailboxes = {}
         self.byimapname = {}
-        self.byuid = {}
+        self.emails = {}
         self.loop = loop or asyncio.get_running_loop()
         self.imap = IMAP4(host, port, loop=self.loop, timeout=600)
+
+    async def ainit(self):
+        """Asynchronously connects to imap class"""
+        await self.imap.wait_hello_from_server()
+        await self.imap.login(self.username, self.password)
+        await self.imap.enable("UTF8=ACCEPT")
+        await self.imap.enable("QRESYNC")
+        await self.imap.select('virtual/All')
+        await self.sync_mailboxes()
 
     async def mailbox_get(self, idmap, ids=None, properties=None):
         """
@@ -179,69 +176,75 @@ class ImapAccount(PersonalAccount):
         # CREATE
         created = {}
         notCreated = {}
-        if create:
-            imapnames = []
-            for cid, mailbox in create.items():
-                try:
-                    mbox = ImapMailbox(mailbox)
-                    mbox.db = self
-                    imapname = mbox['imapname']
-                    ok, lines = await self.imap.create(imapname)
-                    if ok != 'OK':
-                        if '[ALREADYEXISTS]' in lines[0]:
-                            raise errors.invalidArguments(lines[0])
-                        else:
-                            raise errors.serverFail(lines[0])
-                    match = re.search(r'\[MAILBOXID ([0-9A-Za-z-]+)]\]', lines[0])
-                    if match:
-                        id = match.group(1)
-                        mbox[id] = id
-                        self.mailboxes[id] = mbox
-                        self.byimapname[imapname] = mbox
-                    if not mailbox.get('isSubscribed', True):
-                        ok, lines = await self.imap.unsubscribe(imapname)
-                        # TODO: handle failed unsubscribe
-                    imapnames.append(imapname)
-                except KeyError:
-                    notCreated[cid] = errors.invalidArguments().to_dict()
-                except errors.JmapError as e:
-                    notCreated[cid] = e.to_dict()
-            await self.sync_mailboxes()
-            for imapname in imapnames:
-                mbox = self.byimapname.get(imapname, None)
-                if mbox:
-                    created[cid] = {'id': mbox['id']}
-                    idmap.set(cid, mbox['id'])
+        created_imapnames = {}
+        for cid, mailbox in (create or {}).items():
+            try:
+                mbox = ImapMailbox(mailbox)
+                mbox.db = self
+                imapname = mbox['imapname']
+                ok, lines = await self.imap.create(imapname)
+                if ok != 'OK':
+                    if '[ALREADYEXISTS]' in lines[0]:
+                        raise errors.invalidArguments(lines[0])
+                    else:
+                        raise errors.serverFail(lines[0])
+                match = re.search(r'\[MAILBOXID \(([^)]+)\)\]', lines[0])
+                if match:
+                    id = match.group(1)
+                    mbox[id] = id
+                    mbox['sep'] = '/'
+                    mbox['flags'] = set()
+                    self.mailboxes[id] = mbox
+                    self.byimapname[imapname] = mbox
+                    created[cid] = {'id': id}
                 else:
-                    notCreated[cid] = errors.serverFail().to_dict()
+                    # set created[cid] after sync_mailboxes()
+                    created_imapnames[cid] = imapname
+                if not mailbox.get('isSubscribed', True):
+                    ok, lines = await self.imap.unsubscribe(imapname)
+                    # TODO: handle failed unsubscribe
+            except KeyError:
+                notCreated[cid] = errors.invalidArguments().to_dict()
+            except errors.JmapError as e:
+                notCreated[cid] = e.to_dict()
 
         # UPDATE
         updated = {}
         notUpdated = {}
-        if update:
-            for id, mailbox in update.items():
-                try:
-                    await self.update_mailbox(id, **mailbox)
-                    updated[id] = mailbox
-                except errors.JmapError as e:
-                    notUpdated[id] = e.to_dict()
+        for id, update in (update or {}).items():
+            try:
+                mailbox = self.mailboxes.get(id, None)
+                if not mailbox or mailbox['deleted']:
+                    raise errors.notFound(f'Mailbox {id} not found')
+                await self.update_mailbox(mailbox, update)
+                updated[id] = update
+            except errors.JmapError as e:
+                notUpdated[id] = e.to_dict()
 
         # DESTROY
         destroyed = []
         notDestroyed = {}
-        if destroy:
-            for id in destroy:
-                try:
-                    mailbox = self.mailboxes.get(id, None)
-                    if not mailbox or mailbox['deleted']:
-                        raise errors.notFound('mailbox not found')
-                    ok, lines = await self.imap.delete(mailbox['imapname'])
-                    if ok != 'OK':
-                        raise errors.serverFail(lines[0])
-                    mailbox['deleted'] = True
-                    destroyed.append(id)
-                except errors.JmapError as e:
-                    notDestroyed[id] = e.to_dict()
+        for id in destroy or ():
+            try:
+                mailbox = self.mailboxes.get(id, None)
+                if not mailbox or mailbox['deleted']:
+                    raise errors.notFound('mailbox not found')
+                ok, lines = await self.imap.delete(mailbox['imapname'])
+                if ok != 'OK':
+                    raise errors.serverFail(lines[0])
+                mailbox['deleted'] = True
+                destroyed.append(id)
+            except errors.JmapError as e:
+                notDestroyed[id] = e.to_dict()
+
+        await self.sync_mailboxes()
+        for cid, imapname in created_imapnames.values():
+            mbox = self.byimapname.get(imapname, None)
+            if mbox:
+                created[cid] = {'id': mbox['id']}
+                idmap.set(cid, mbox['id'])
+            else:
+                notCreated[cid] = errors.serverFail().to_dict()
 
         return {
             'accountId': self.id,
@@ -432,25 +435,18 @@ class ImapAccount(PersonalAccount):
             # get MAX_OBJECTS_IN_GET
             ok, lines = await self.imap.search('ALL', ret='ALL')
             messageset = parse_esearch(lines).get('ALL', '')
-            uids = list(iter_messageset(messageset))
-            uids = uids[:MAX_OBJECTS_IN_GET]
+            ids = map(format_message_id, iter_messageset(messageset))
+            ids = tuple(itertools.islice(ids, MAX_OBJECTS_IN_GET))
         elif len(ids) > MAX_OBJECTS_IN_GET:
             raise errors.tooLarge('Requested more than {MAX_OBJECTS_IN_GET} ids')
-        else:
-            uids = []
-            for id in ids:
-                try:
-                    uids.append(parse_message_id(idmap.get(id)))
-                except ValueError:
-                    notFound.append(id)
 
-        await self.fill_messages(simple_props, uids)
+        await self.fill_emails(simple_props, ids)
 
-        for uid in uids:
+        for id in ids:
             try:
-                msg = self.byuid[uid]
+                msg = self.emails[id]
             except KeyError:
-                notFound.append(format_message_id(uid))
+                notFound.append(id)
                 continue
 
             # Fill most of msg properties except header:*
@@ -529,17 +525,11 @@ class ImapAccount(PersonalAccount):
         updated = {}
         notUpdated = {}
         if update:
-            uids = []
-            for id in update.keys():
+            ids = [idmap.get(id) for id in update.keys()]
+            await self.fill_emails(('keywords', 'mailboxIds'), ids)
+            for id in ids:
                 try:
-                    uids.append(parse_message_id(id))
-                except ValueError:
-                    notUpdated[id] = errors.notFound().to_dict()
-            await self.fill_messages(('keywords', 'mailboxIds'), uids)
-            for uid in uids:
-                id = format_message_id(uid)
-                try:
-                    msg = self.byuid[uid]
+                    msg = self.emails[id]
                 except KeyError:
                     notUpdated[id] = errors.notFound().to_dict()
                     continue
@@ -554,18 +544,19 @@ class ImapAccount(PersonalAccount):
         notDestroyed = {}
         if destroy:
             uids = []
-            for id in update.keys():
+            ids = [idmap.get(id) for id in update.keys()]
+            for id in ids:
                 try:
-                    uids.append(parse_message_id(id))
+                    uids.append(parse_message_id(ids))
                 except ValueError:
                     notDestroyed[id] = errors.notFound().to_dict()
 
             messageset = encode_messageset(uids).encode()
             await self.imap.uid_store(messageset, '+FLAGS', '(\\Deleted)')
             await self.imap.uid_expunge(messageset)
-            for uid in uids:
-                self.byuid.pop(id, None)
-                destroyed.append(format_message_id(uid))
+            for id in ids:
+                self.emails.pop(id, None)
+                destroyed.append(id)
                 # TODO: notDestroyed[id] = errors.notFound().to_dict()
 
         return {
@@ -636,10 +627,10 @@ class ImapAccount(PersonalAccount):
         if messageset:
             ok, lines = await self.imap.uid_thread('REFS', 'UID %s' % messageset)
             threads = parse_thread(lines)
-            await self.fill_messages(['threadId'], [int(t[0]) for t in threads])
+            await self.fill_emails(['threadId'], [t[0] for t in threads])
             for thread in threads:
                 try:
-                    msg = self.byuid[int(thread[0])]
+                    msg = self.emails[thread[0]]  # format_message_id
                 except KeyError:
                     continue
                 lst.append({'id': msg['threadId'], 'emailIds': thread})
@@ -650,6 +641,63 @@ class ImapAccount(PersonalAccount):
             'state': await self.thread_state(),
             'notFound': notFound,
         }
+
+    async def download(self, blobId):
+        search = self.as_imap_search({'blobId': blobId})
+        ok, lines = self.imap.uid_search(search, ret='ALL')
+        messageset = parse_esearch(lines)
+        for uid in messageset:
+            ok, lines = self.imap.uid_fetch(str(uid), '(RFC822)')
+            for seq, data in parse_fetch(lines[:-1]):
+                return data['RFC822']
+        raise errors.notFound(f"Blob {blobId} not found")
+
+
+    async def email_import(self, ifInState=None, emails=()):
+        oldState = await self.thread_state()
+        if ifInState and ifInState != oldState:
+            raise errors.stateMismatch({'newState': oldState})
+
+        created = {}
+        notCreated = {}
+        for id, email in emails.items():
+            try:
+                blobId = email.get('blobId', None)
+                if not blobId:
+                    raise errors.invalidArguments()
+                body = await self.download(blobId)
+                mailboxIds = email.get('mailboxIds', None)
+                if not mailboxIds:
+                    raise errors.invalidArguments('mailboxIds are required')
+                elif len(mailboxIds) > 1:
+                    raise errors.invalidArguments('Max 1 mailboxIds allowed')
+                try:
+                    imapname = self.mailboxes[mailboxIds[0]]['imapname']
+                except KeyError:
+                    raise errors.notFound(f"mailboxId {mailboxIds[0]} not found")
+                flags = "(%s)" % \
+                        (' '.join(keyword2flag(kw) for kw in email['keywords']))
+                if 'receivedAt' in email:
+                    date = email['receivedAt']
+                else:
+                    # TODO: most recent Received header
+                    date = datetime.now()
+                ok, lines = self.imap.append(body, imapname, flags, date)
+                match = re.search(r'\[APPENDUID (\d+) (\d+)\]', lines[0])
+                created[id] = format_message_id(int(match.group(2)))
+            except errors.JmapError as e:
+                notCreated[id] = e.to_dict()
+            except Exception as e:
+                notCreated[id] = errors.serverPartialFail(str(e))
+
+        return {
+            'accountId': self.id,
+            'oldState': oldState,
+            'newState': await self.email_state(),
+            'created': created,
+            'notCreated': notCreated,
+        }
+
 
     async def thread_changes(self, sinceState, maxChanges=None):
         # TODO: threadIds
@@ -679,8 +727,8 @@ class ImapAccount(PersonalAccount):
     async def thread_state_low(self):
         await self.email_state_low()
 
-    async def fill_messages(self, properties=(), uids=None, ids=None):
-        """Fills self.byuid with required properties"""
+    async def fill_emails(self, properties=(), ids=None):
+        """Fills self.emails with required properties"""
 
         try:
             fields = {FIELDS_MAP[prop] for prop in properties}
@@ -693,14 +741,18 @@ class ImapAccount(PersonalAccount):
 
         fetch_uids = set()
         fetch_fields = set()
-        for uid in uids:
+        for id in ids:
             try:
-                msg = self.byuid[uid]
-                missing_fields = fields - msg.keys()
-                if missing_fields:
+                uid = parse_message_id(id)
+            except ValueError:
+                continue
+            msg = self.emails.get(id, None)
+            if msg is not None:
+                missing = fields - msg.keys()
+                if missing:
                     fetch_uids.add(uid)
-                    fetch_fields.update(missing_fields)
-            except KeyError:
+                    fetch_fields.update(missing)
+            else:
                 fetch_uids.add(uid)
                 fetch_fields = fields
 
@@ -710,13 +762,13 @@ class ImapAccount(PersonalAccount):
         fetch_uids = encode_messageset(fetch_uids).decode()
         ok, lines = await self.imap.uid_fetch(fetch_uids, "(%s)" % (' '.join(fetch_fields)))
         for seq, data in parse_fetch(lines[:-1]):
-            uid = int(data['UID'])
-            msg = self.byuid.get(uid, None)
+            id = data['UID']  # format_message_id
+            msg = self.emails.get(id, None)
             if not msg:
-                msg = ImapEmail(id=format_message_id(uid))
-                self.byuid[uid] = msg
+                msg = ImapEmail(id=id)
+                self.emails[id] = msg
             if 'mailboxIds' in properties:
-                imapname = unquoted(data.pop('X-MAILBOX'))
+                imapname = unquoted(data['X-MAILBOX'])
                 msg['mailboxIds'] = [self.byimapname[imapname]['id']]
             msg.update(data)
 
@@ -783,7 +835,7 @@ class ImapAccount(PersonalAccount):
             if mailbox:
                 deleted_ids.remove(id)
             else:
-                mailbox = ImapMailbox(id=id, imapname=None, sep=None, flags=None)
+                mailbox = ImapMailbox(id=id, imapname=imapname, sep=sep, flags=flags)
                 mailbox.db = self
                 self.byimapname[imapname] = mailbox
                 self.mailboxes[id] = mailbox
@@ -821,39 +873,43 @@ class ImapAccount(PersonalAccount):
             raise errors.notFound('parent folder not found')
         return parent['imapname'] + parent['sep'] + name
 
-    async def update_mailbox(self, id, name=None, parentId=None, isSubscribed=None, sortOrder=None, **update):
-        mailbox = self.mailboxes.get(id, None)
-        if not mailbox or mailbox['deleted']:
-            raise errors.notFound('mailbox not found')
-        imapname = mailbox['imapname']
+    async def update_mailbox(self, mailbox, update):
+        renamefrom = None
+        subscribe = None
 
-        if (name is not None and name != mailbox['name']) or \
-                (parentId is not None and parentId != mailbox['parentId']):
-            if not name:
-                raise errors.invalidProperties('name is required')
-            newimapname = self.mailbox_imapname(parentId, name)
-            ok, lines = await self.imap.rename(imapname, newimapname)
+        for key, value in update.items():
+            if value != mailbox[key]:
+                if key in ('name', 'parentId'):
+                    renamefrom = mailbox.pop('imapname')
+                elif key == 'isSubscribed':
+                    subscribe = bool(value)
+                elif key == 'sortOrder':
+                    # TODO: store in persistent storage
+                    pass
+                mailbox[key] = value
+
+        if renamefrom:
+            renameto = mailbox['imapname']
+            ok, lines = await self.imap.rename(renamefrom, renameto)
             if ok != 'OK':
                 raise errors.serverFail(lines[0])
 
-        if isSubscribed is not None and isSubscribed != mailbox['isSubscribed']:
-            if isSubscribed:
-                ok, lines = await self.imap.subscribe(imapname)
+        if subscribe is not None:
+            if subscribe:
+                ok, lines = await self.imap.subscribe(mailbox['imapname'])
             else:
-                ok, lines = await self.imap.unsubscribe(imapname)
+                ok, lines = await self.imap.unsubscribe(mailbox['imapname'])
             if ok != 'OK':
-                raise errors.serverFail(lines[0])
-
-        if sortOrder is not None and sortOrder != mailbox['sortOrder']:
-            # TODO: store in persistent storage
-            mailbox['sortOrder'] = sortOrder
-        await self.sync_mailboxes()
+                if renamefrom:
+                    raise errors.serverPartialFail(lines[0])
+                else:
+                    raise errors.serverFail(lines[0])
 
     def as_imap_search(self, criteria):
         out = bytearray()
-        operator = criteria.get('operator', None)
-        if operator:
-            conds = criteria['conds']
+        if 'operator' in criteria:
+            operator = criteria['operator']
+            conds = criteria['conditions']
             if operator == 'NOT' or operator == 'OR':
                 if len(conds) > 0:
                     if operator == 'NOT':
@@ -932,6 +988,9 @@ class ImapAccount(PersonalAccount):
 def int2bytes(i):
     return b'%d' % i
 
+def quoted_bytes(s):
+    return quoted(bytes(s))
+
 
 SEARCH_MAP = {
     'blobId': (b'EMAILID', bytes),
@@ -944,13 +1003,13 @@ SEARCH_MAP = {
     'noneInThreadHaveKeyword': (b'NOT INTHREAD KEYWORD', keyword2flag),
     'before': (b'BEFORE', bytes),  # TODO: consider time, not only date
     'after': (b'AFTER', bytes),
-    'subject': (b'SUBJECT', bytes),
-    'text': (b'TEXT', bytes),
-    'body': (b'BODY', bytes),
-    'from': (b'FROM', bytes),
-    'to': (b'TO', bytes),
-    'cc': (b'CC', bytes),
-    'bcc': (b'BCC', bytes),
+    'subject': (b'SUBJECT', quoted_bytes),
+    'text': (b'TEXT', quoted_bytes),
+    'body': (b'BODY', quoted_bytes),
+    'from': (b'FROM', quoted_bytes),
+    'to': (b'TO', quoted_bytes),
+    'cc': (b'CC', quoted_bytes),
+    'bcc': (b'BCC', quoted_bytes),
 }
 
 SORT_MAP = {
@@ -977,83 +1036,21 @@ def as_imap_sort(sort):
     return out
 
 
-def find_type(message, part):
-    if message.get('id', '') == part:
-        return message['type']
-
-    for sub in message['attachments']:
-        typ = find_type(sub, part)
-        if type:
-            return type
-    return None
-
-
 def now_state():
     return str(int(datetime.now().timestamp()))
 
 
 def _mailbox_match(mbox, filter):
     if 'hasRole' in filter and \
-            bool(filter['hasRole']) != bool(mbox.get('role', False)):
+            bool(filter['hasRole']) != bool(mbox['role']):
         return False
-
     if 'isSubscribed' in filter and \
-            bool(filter['isSubscribed']) != bool(mbox.get('isSubscribed', False)):
+            bool(filter['isSubscribed']) != bool(mbox['isSubscribed']):
         return False
-
     if 'parentId' in filter and \
-            filter['parentId'] != mbox.get('parentId', None):
+            filter['parentId'] != mbox['parentId']:
         return False
-
     return True
-
-def _makefullnames(mailboxes):
-    idmap = {d['id']: d for d in mailboxes}
-    idmap.pop('', None)  # just in case
-    fullnames = {}
-    for id, mbox in idmap.items():
-        names = []
-        while mbox:
-            names.append(mbox['name'])
-            mbox = idmap.get(mbox['parentId'], None)
-        fullnames[id] = '\x1e'.join(reversed(names))
-    return fullnames
 
 def _mailbox_sort(data, sortargs, storage):
     return data
-
-    # TODO: make correct sorting
-    def key(mbox):
-        k = []
-        for arg in sortargs:
-            field = arg['property']
-            if field == 'name':
-                k.append(mbox['name'])
-            elif field == 'sortOrder':
-                k.append(mbox['sortOrder'])
-            elif field == 'parent/name':
-                if 'fullnames' not in storage:
-                    storage['fullnames'] = _makefullnames(storage['data'])
-                    k.append(storage['fullnames'][mbox['id']])
-                k.append(mbox['sortOrder'])
-            else:
-                raise errors.unsupportedSort('Unknown field ' + field)
-
-    return sorted(data, key=key)
-
-
-# http://rightfootin.blogspot.com/2006/09/more-on-python-flatten.html
-def flatten(l, ltypes=(list, tuple)):
-    ltype = type(l)
-    l = list(l)
-    i = 0
-    while i < len(l):
-        while isinstance(l[i], ltypes):
-            if not l[i]:
-                l.pop(i)
-                i -= 1
-                break
-            else:
-                l[i:i + 1] = l[i]
-        i += 1
-    return ltype(l)

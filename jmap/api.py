@@ -3,13 +3,18 @@ import logging as log
 from time import monotonic
 import re
 
-from jmap.account import ImapAccount
+from starlette.responses import Response
+
 import jmap.core as core
 import jmap.mail as mail
 import jmap.submission as submission
 import jmap.vacationresponse as vacationresponse
 from jmap import errors
 
+try:
+    import orjson as json
+except ImportError:
+    import json
 
 CAPABILITIES = {
     'urn:ietf:params:jmap:core': core,
@@ -23,11 +28,26 @@ for module in CAPABILITIES.values():
     module.register_methods(METHODS)
 
 
-async def handle_request(user, data):
+class JSONResponse(Response):
+    media_type = "application/json"
+    def render(self, content) -> bytes:
+        return json.dumps(content)
+
+
+async def api(request):
     results = []
     results_bytag = {}
 
-    api = Api(user, data.get('createdIds', None))
+    try:
+        data = await request.json()
+    except Exception:
+        return JSONResponse({
+            "type": "urn:ietf:params:jmap:error:notJson",
+            "status": 400,
+            "detail": "The content of the request did not parse as JSON."
+        }, 400)
+
+    request.scope['idmap'] = IdMap(data.get('createdIds', {}))
 
     for method_name, kwargs, tag in data['methodCalls']:
         t0 = monotonic() * 1000
@@ -56,13 +76,13 @@ async def handle_request(user, data):
             continue
 
         try:
-            result = method(api, **kwargs)
+            result = method(request, **kwargs)
             if isawaitable(result):
                 result = await result
             results.append((method_name, result, tag))
             results_bytag[tag] = result
         except errors.JmapError as e:
-            results.append(e.as_dict())
+            results.append(e.to_dict())
         except Exception as e:
             results.append(('error', {
                 'type': e.__class__.__name__,
@@ -74,24 +94,11 @@ async def handle_request(user, data):
 
     out = {
         'methodResponses': results,
-        'sessionState': user.sessionState,
+        'sessionState': request['user'].sessionState,
     }
     if 'createdIds' in data:
         out['createdIds'] = data['createdIds']
-    return out
-
-
-class Api:
-    def __init__(self, user, idmap=None):
-        self.user = user
-        self.idmap = IdMap(idmap or {})
-        self.methods = {}
-    
-    def get_account(self, accountId) -> ImapAccount:
-        try:
-            return self.user.accounts[accountId]
-        except KeyError:
-            raise errors.accountNotFound()
+    return JSONResponse(out)
 
 
 class IdMap(dict):

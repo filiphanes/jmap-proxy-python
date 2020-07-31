@@ -1,43 +1,17 @@
 import asyncio
 import os
 
-try:
-    import orjson as json
-    dumps_options = {'option': json.OPT_INDENT_2}
-except ImportError:
-    import json
-    dumps_options = {}
-
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.middleware.authentication import AuthenticationMiddleware
 from starlette.middleware.cors import CORSMiddleware
 from starlette.responses import Response, StreamingResponse
-from starlette.routing import Route, Mount
-from starlette.staticfiles import StaticFiles
+from starlette.routing import Route
 
-from jmap.api import handle_request, CAPABILITIES
+from jmap.api import api, CAPABILITIES, JSONResponse
 from user import BasicAuthBackend
 
-
-class JSONResponse(Response):
-    media_type = "application/json"
-
-    def render(self, content) -> bytes:
-        return json.dumps(content, **dumps_options)
-
-
-async def api(request):
-    try:
-        data = json.loads(await request.body())
-    except Exception:
-        return JSONResponse({
-            "type": "urn:ietf:params:jmap:error:notJson",
-            "status": 400,
-            "detail": "The content of the request did not parse as JSON."
-        }, 400)
-    res = await handle_request(request.user, data)
-    return JSONResponse(res)
+BASEURL = os.getenv('BASEURL', 'http://127.0.0.1:8888')
 
 
 async def event_stream(request, types, closeafter, ping):
@@ -72,11 +46,42 @@ async def event(request):
         media_type='text/event-stream',
     )
 
+async def upload(request):
+    user = request['user']
+    try:
+        accountId = request.path_params['accountId']
+        account = user.accounts[accountId]
+    except KeyError:
+        return Response('No access to this accountId', 403)
+    res = account.upload(request.stream(), request.headers['content-type'])
+    return JSONResponse(res)
 
-BASEURL = os.getenv('BASEURL', 'http://127.0.0.1:8888')
+
+async def download(request):
+    user = request['user']
+    try:
+        accountId = request.path_params['accountId']
+        account = user.accounts[accountId]
+    except KeyError:
+        return Response('No access to this accountId', 403)
+    blobId = request.path_params['blobId']
+    try:
+        body = account.download(blobId)
+    except Exception as e:
+        return Response(str(e), 404)
+    name = request.path_params['name']
+    headers = {
+        'content-disposition': 'attachment; name=' + name
+    }
+    if 'type' in request.query_params:
+        headers['content-type'] = request.query_params['type']
+    return Response(body, 200, headers=headers)
+
+
 async def well_known_jmap(request):
     res = {
-        "capabilities": {u: c.capabilityValue for u, c in CAPABILITIES.items()},
+        "capabilities": {name: module.capability
+                         for name, module in CAPABILITIES.items()},
         "username": request.user.username,
         "accounts": {
             account.id: {
@@ -104,8 +109,9 @@ async def well_known_jmap(request):
 routes = [
     Route('/api/', api, methods=["POST", "GET"]),
     Route('/event/', event),
+    Route('/upload/{accountId}', upload, methods=["POST"]),
+    Route('/download/{accountId}/{blobId}/{name}', download),
     Route('/.well-known/jmap', well_known_jmap),
-    # Mount('/', StaticFiles(directory="web", html=True)),
 ]
 
 middleware = [

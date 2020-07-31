@@ -17,19 +17,26 @@ def accountId():
 
 @pytest.fixture(scope='module')
 @pytest.mark.asyncio
-async def db(accountId):
-    from jmap.db import ImapDB
-    return await ImapDB.init(accountId)
-
-
-@pytest.fixture(scope='module')
-@pytest.mark.asyncio
 async def user(accountId, event_loop):
     from user import User
-    return await User.init(accountId, 'h', loop=event_loop)
+    user = User(accountId, 'h', loop=event_loop)
+    await user.ainit()
+    return user
 
 
 @pytest.fixture(scope='module')
-def api(user):
-    from jmap.api import Api
-    return Api(user)
+def account(user, accountId):
+    return user.get_account(accountId)
+
+
+@pytest.fixture()
+def idmap():
+    from jmap.api import IdMap
+    return IdMap({})
+
+
+@pytest.fixture(scope='module')
+def req(user):
+    from starlette.requests import Request
+    scope = {'type': 'http', 'user': user}
+    return Request(scope)
