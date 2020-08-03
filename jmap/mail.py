@@ -6,22 +6,22 @@ capability = {}
 
 def register_methods(methods):
     methods.update({
-        'Email/get': api_Email_get,
-        'Email/set': api_Email_set,
-        'Email/query': api_Email_query,
-        'Email/changes': api_Email_changes,
-        'Email/queryChanges': api_Email_queryChanges,
-        'Email/copy': api_Email_copy,
-        'Email/import': api_Email_import,
-        'Email/parse': api_Email_parse,
-        'Mailbox/get': api_Mailbox_get,
-        'Mailbox/set': api_Mailbox_set,
-        'Mailbox/query': api_Mailbox_query,
-        'Mailbox/changes': api_Mailbox_changes,
+        'Email/get':            api_Email_get,
+        'Email/set':            api_Email_set,
+        'Email/query':          api_Email_query,
+        'Email/changes':        api_Email_changes,
+        'Email/queryChanges':   api_Email_queryChanges,
+        'Email/copy':           api_Email_copy,
+        'Email/import':         api_Email_import,
+        'Email/parse':          api_Email_parse,
+        'Mailbox/get':          api_Mailbox_get,
+        'Mailbox/set':          api_Mailbox_set,
+        'Mailbox/query':        api_Mailbox_query,
+        'Mailbox/changes':      api_Mailbox_changes,
         'Mailbox/queryChanges': api_Mailbox_queryChanges,
-        'Thread/get': api_Thread_get,
-        'Thread/changes': api_Thread_changes,
-        'SearchSnippet/get': api_SearchSnippet_get,
+        'Thread/get':           api_Thread_get,
+        'Thread/changes':       api_Thread_changes,
+        'SearchSnippet/get':    api_SearchSnippet_get,
     })
 
 def api_Email_get(request, accountId, **kwargs):

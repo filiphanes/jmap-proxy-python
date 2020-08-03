@@ -8,7 +8,7 @@ from jmap.core import MAX_OBJECTS_IN_GET
 from jmap.parse import asAddresses, asDate, asGroupedAddresses, asMessageIds, asRaw, asText, asURLs, htmltotext
 from .aioimaplib import IMAP4, parse_list_status, parse_esearch, parse_status, parse_fetch, iter_messageset, \
     encode_messageset, parse_thread, unquoted, quoted
-from .message import ImapEmail, EmailState, format_message_id, parse_message_id, keyword2flag
+from .email import ImapEmail, EmailState, format_email_id, parse_email_id, keyword2flag
 from .mailbox import ImapMailbox
 
 ALL_MAILBOX_PROPERTIES = {
@@ -116,6 +116,7 @@ class ImapAccount:
         self.mailboxes = {}
         self.byimapname = {}
         self.emails = {}
+        self.blobs = {}
         self.loop = loop or asyncio.get_running_loop()
         self.imap = IMAP4(host, port, loop=self.loop, timeout=600)
 
@@ -361,7 +362,7 @@ class ImapAccount:
             ok, lines = await self.imap.uid_search(search_criteria.decode(), ret='ALL COUNT')
         uids = parse_esearch(lines).get('ALL', '')
 
-        ids = [format_message_id(uid) for uid in iter_messageset(uids)]
+        ids = [format_email_id(uid) for uid in iter_messageset(uids)]
         if anchor:
             # need to calculate position
             try:
@@ -435,7 +436,7 @@ class ImapAccount:
             # get MAX_OBJECTS_IN_GET
             ok, lines = await self.imap.search('ALL', ret='ALL')
             messageset = parse_esearch(lines).get('ALL', '')
-            ids = map(format_message_id, iter_messageset(messageset))
+            ids = map(format_email_id, iter_messageset(messageset))
             ids = tuple(itertools.islice(ids, MAX_OBJECTS_IN_GET))
         elif len(ids) > MAX_OBJECTS_IN_GET:
             raise errors.tooLarge('Requested more than {MAX_OBJECTS_IN_GET} ids')
@@ -455,12 +456,14 @@ class ImapAccount:
             if 'textBody' in msg and 'htmlBody' not in msg and not msg['textBody']:
                 data['textBody'] = htmltotext(msg['htmlBody'])
             if 'bodyValues' in properties:
-                if fetchHTMLBodyValues:
-                    data['bodyValues'] = {k: v for k, v in msg['bodyValues'].items() if v['type'] == 'text/html'}
-                elif fetchTextBodyValues:
-                    data['bodyValues'] = {k: v for k, v in msg['bodyValues'].items() if v['type'] == 'text/plain'}
-                elif fetchAllBodyValues:
-                    data['bodyValues'] = msg['bodyValues']
+                # if fetchHTMLBodyValues:
+                #     data['bodyValues'] = {k: v for k, v in msg['bodyValues'].items() if v['type'] == 'text/html'}
+                # elif fetchTextBodyValues:
+                #     data['bodyValues'] = {k: v for k, v in msg['bodyValues'].items() if v['type'] == 'text/plain'}
+                # elif fetchAllBodyValues:
+                #     data['bodyValues'] = msg['bodyValues']
+                # jmap-demo-webmail needs all bodyValues even when fetchHTMLBodyValues=True
+                data['bodyValues'] = msg['bodyValues']
                 if maxBodyValueBytes:
                     for k, bodyValue in data['bodyValues'].items():
                         if len(bodyValue['value']) > maxBodyValueBytes:
@@ -512,10 +515,12 @@ class ImapAccount:
                     if not mailbox or mailbox['deleted']:
                         raise errors.notFound(f"Mailbox {mailboxid} not found")
                     msg = ImapEmail(**data)
-                    ok, lines = await self.imap.append(mailbox['imapname'], msg['RFC822'], flags=msg['flags'])
+                    body = msg['RFC822']
+                    flags = "(%s)" % (''.join(msg['FLAGS']))
+                    ok, lines = await self.imap.append(body, mailbox['imapname'], flags)
                     match = re.search(r'\[APPENDUID (\d+) (\d+)\]', lines[0])
                     # TODO: FETCH UID and EMAILID
-                    id = format_message_id(int(match.group(2)))
+                    id = format_email_id(int(match.group(2)))
                     created[cid] = {'id': id, 'blobId': msg['blobId']}
                     idmap.set(cid, id)
                 except errors.JmapError as e:
@@ -534,7 +539,7 @@ class ImapAccount:
                     notUpdated[id] = errors.notFound().to_dict()
                     continue
                 try:
-                    await self.update_message(msg, update[id], ifInState)
+                    await self.update_email(msg, update[id], ifInState)
                     updated[id] = update[id]
                 except errors.JmapError as e:
                     notUpdated[id] = e.to_dict()
@@ -547,7 +552,7 @@ class ImapAccount:
             ids = [idmap.get(id) for id in update.keys()]
             for id in ids:
                 try:
-                    uids.append(parse_message_id(ids))
+                    uids.append(parse_email_id(ids))
                 except ValueError:
                     notDestroyed[id] = errors.notFound().to_dict()
 
@@ -584,7 +589,7 @@ class ImapAccount:
             '(CHANGEDSINCE %s VANISHED)' % state.modseq
         )
         if lines[0].startswith('(EARLIER) '):
-            removed = [format_message_id(uid)
+            removed = [format_email_id(uid)
                        for uid in iter_messageset(lines[0][10:])]
             lines = lines[1:]
         else:
@@ -595,9 +600,9 @@ class ImapAccount:
         for seq, data in parse_fetch(lines[:-1]):
             uid = int(data['UID'])
             if uid > state.uid:
-                created.append(format_message_id(uid))
+                created.append(format_email_id(uid))
             else:
-                updated.append(format_message_id(uid))
+                updated.append(format_email_id(uid))
 
         # TODO: create intermediate state
         if maxChanges and len(removed) + len(created) + len(updated) > maxChanges:
@@ -618,22 +623,25 @@ class ImapAccount:
         notFound = []
 
         if ids is None:
-            messageset = '1:*'
+            ok, lines = await self.imap.uid_search('ALL', ret='ALL')
+            messageset = parse_esearch(lines).get('ALL', '')
         else:
             ids = [idmap.get(id) for id in ids]
             search = self.as_imap_search({'threadIds': ids}).decode()
             ok, lines = await self.imap.uid_search(search, ret='ALL')
             messageset = parse_esearch(lines).get('ALL', '')
         if messageset:
-            ok, lines = await self.imap.uid_thread('REFS', 'UID %s' % messageset)
-            threads = parse_thread(lines)
-            await self.fill_emails(['threadId'], [t[0] for t in threads])
-            for thread in threads:
+            # ok, lines = await self.imap.uid_thread('REFS', 'UID %s' % messageset)
+            # threads = parse_thread(lines)
+            # await self.fill_emails(['blobId'], [t[0] for t in threads])
+            ids = [format_email_id(uid) for uid in iter_messageset(messageset)]
+            await self.fill_emails(['blobId'], ids)
+            for id in ids:
                 try:
-                    msg = self.emails[thread[0]]  # format_message_id
+                    msg = self.emails[id]
                 except KeyError:
                     continue
-                lst.append({'id': msg['threadId'], 'emailIds': thread})
+                lst.append({'id': msg['blobId'], 'emailIds': [id]})
 
         return {
             'accountId': self.id,
@@ -684,7 +692,7 @@ class ImapAccount:
                     date = datetime.now()
                 ok, lines = self.imap.append(body, imapname, flags, date)
                 match = re.search(r'\[APPENDUID (\d+) (\d+)\]', lines[0])
-                created[id] = format_message_id(int(match.group(2)))
+                created[id] = format_email_id(int(match.group(2)))
             except errors.JmapError as e:
                 notCreated[id] = e.to_dict()
             except Exception as e:
@@ -743,7 +751,7 @@ class ImapAccount:
         fetch_fields = set()
         for id in ids:
             try:
-                uid = parse_message_id(id)
+                uid = parse_email_id(id)
             except ValueError:
                 continue
             msg = self.emails.get(id, None)
@@ -762,7 +770,7 @@ class ImapAccount:
         fetch_uids = encode_messageset(fetch_uids).decode()
         ok, lines = await self.imap.uid_fetch(fetch_uids, "(%s)" % (' '.join(fetch_fields)))
         for seq, data in parse_fetch(lines[:-1]):
-            id = data['UID']  # format_message_id
+            id = data['UID']  # format_email_id
             msg = self.emails.get(id, None)
             if not msg:
                 msg = ImapEmail(id=id)
@@ -772,7 +780,7 @@ class ImapAccount:
                 msg['mailboxIds'] = [self.byimapname[imapname]['id']]
             msg.update(data)
 
-    async def update_message(self, msg, update, ifInState=None):
+    async def update_email(self, msg, update, ifInState=None):
         flags_add = []
         flags_del = []
         mids_add = []
@@ -805,7 +813,7 @@ class ImapAccount:
                 else:
                     raise errors.invalidArguments(f"Unknown update {path}")
 
-        # uid = parse_message_id(id) # following lines uses directly id
+        # uid = parse_email_id(id) # following lines uses directly id
         if flags_add:
             await self.imap.uid_store(msg['id'], '+FLAGS', f"({' '.join(flags_add)})")
         if flags_del:

@@ -74,10 +74,10 @@ class SmtpAccountMixin:
             identity = self.identities.get(submission['identityId'], None)
             if identity is None:
                 raise errors.notFound(f"Identity {submission['identityId']} not found")
-            envelope = submission.get('envelope', None)
             email = self.emails.get(submission['emailId'], None)
             if not email:
                 raise errors.notFound(f"EmailId {submission['emailId']} not found")
+            envelope = submission.get('envelope', None)
             if envelope:
                 sender = envelope['mailFrom']
                 recipients = [to['submission'] for to in envelope['rcptTo']]

@@ -1,4 +1,5 @@
 import email
+from email.message import EmailMessage
 from email.policy import default
 import re
 
@@ -89,11 +90,21 @@ class ImapEmail(dict):
         # return [self.db.byimapname[self['X-MAILBOX']]['id']]
 
     def preview(self):
-        preview = self['PREVIEW'][1]
-        if isinstance(preview, str):
-            return unquoted(preview)
-        else:
-            return preview.decode()
+        try:
+            preview = self['PREVIEW'][1]
+            if isinstance(preview, str):
+                return unquoted(preview)
+            else:
+                return preview.decode()
+        except KeyError:
+            pass
+        for part in self['bodyValues'].values():
+            if part['type'] == 'text/plain':
+                return part['value'][:256]
+        for part in self['bodyValues'].values():
+            if part['type'] == 'text/html':
+                return htmltotext(part['value'])[:256]
+        return None
 
     def receivedAt(self):
         return asDate(unquoted(self['INTERNALDATE']))
@@ -118,7 +129,7 @@ class ImapEmail(dict):
 
     def _bodystructure(self):
         self['bodyValues'], self['bodyStructure'] \
-            = bodystructure(self['id'], self['EML'])
+            = bodystructure(self['blobId'], self['EML'])
 
     def bodyStructure(self):
         self._bodystructure()
@@ -145,11 +156,11 @@ class ImapEmail(dict):
         return self['attachments']
 
     # Used when creating message
-    def getFLAGS(self):
-        return [KEYWORD2FLAG.get(kw.lower(), kw.encode()) for kw in self['keywords']]
+    def FLAGS(self):
+        return [keyword2flag(kw) for kw in self['keywords']]
 
-    def getRFC822(self):
-        return make(self, {})
+    def RFC822(self, blobs):
+        return make(self, blobs)
 
     def deleted(self):
         # True is set by instantiator
@@ -157,11 +168,11 @@ class ImapEmail(dict):
 
     def created(self):
         "Get state when this message was created"
-        return EmailState(parse_message_id(self['id']), 1 << 64)
+        return EmailState(parse_email_id(self['id']), 1 << 64)
 
     def updated(self):
         "Get state when this message was udpated"
-        return EmailState(parse_message_id(self['id']), self['MODSEQ'])
+        return EmailState(parse_email_id(self['id']), self['MODSEQ'])
 
 # Define address getters
 # "from" is python reserved keyword, others are similar
@@ -201,27 +212,25 @@ class EmailState:
         return f"{self.uid},{self.modseq}"
 
 
-def format_message_id(uid):
-    return str(uid)
-def parse_message_id(id):
-    return int(id)
+format_email_id = str
+parse_email_id = int
 
-# def format_message_id(mailboxid, uidvalidity, uid):
+# def format_email_id(mailboxid, uidvalidity, uid):
 #     "creates message id from components"
 #     return f'{mailboxid}_{uidvalidity}_{uid}'
-# def parse_message_id(messageid):
+# def parse_email_id(messageid):
 #     "parses given messageid to components"
 #     mailboxid, uidvalidity, uid = messageid.split('_')
 #     return mailboxid, int(uidvalidity), int(uid)
 
-# def format_message_id(mailboxid, uidvalidity, uid):
+# def format_email_id(mailboxid, uidvalidity, uid):
 #     return b2a_base64(
 #         bytes.fromhex(mailboxid) +
 #         uidvalidity.to_bytes(4, 'big') + 
 #         uid.to_bytes(4, 'big'),
 #         newline=False
 #     ).replace(b'+', b'-').replace(b'/', b'_').decode()
-# def parse_message_id(messageid):
+# def parse_email_id(messageid):
 #     b = a2b_base64(messageid.encode().replace(b'-', b'+').replace(b'_', b'/'))
 #     return b[:16].hex(), \
 #            int.from_bytes(b[16:20], 'big'), \

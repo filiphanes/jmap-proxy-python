@@ -5,14 +5,14 @@ capability = {}
 
 def register_methods(methods):
     methods.update({
-        'EmailSubmission/get': api_EmailSubmission_get,
-        'EmailSubmission/set': api_EmailSubmission_set,
-        'EmailSubmission/query': api_EmailSubmission_query,
-        'EmailSubmission/changes': api_EmailSubmission_changes,
+        'EmailSubmission/get':          api_EmailSubmission_get,
+        'EmailSubmission/set':          api_EmailSubmission_set,
+        'EmailSubmission/query':        api_EmailSubmission_query,
+        'EmailSubmission/changes':      api_EmailSubmission_changes,
         'EmailSubmission/queryChanges': api_EmailSubmission_queryChanges,
-        'Identity/get': api_Identity_get,
-        'Identity/set': api_Identity_set,
-        'Identity/changes': api_Identity_changes,
+        'Identity/get':                 api_Identity_get,
+        'Identity/set':                 api_Identity_set,
+        'Identity/changes':             api_Identity_changes,
     })
 
 

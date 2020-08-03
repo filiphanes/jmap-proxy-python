@@ -23,12 +23,13 @@ async def test_identity_get(account, idmap):
         # assert identity['htmlSignature']
         assert identity['mayDelete'] in (True, False)
 
+
 @pytest.mark.asyncio
 async def test_emailsubmission_set(account, idmap):
     response = await account.identity_set(
         idmap,
         create={
-            "send": {
+            "test": {
                 "identityId": account.id,
                 "emailId": EMAIL_ID,
                 "envelope": {
@@ -39,13 +40,12 @@ async def test_emailsubmission_set(account, idmap):
                     "rcptTo": [{
                         "email": account.id,
                         "parameters": None
-                    },
-                    ]
+                    }]
                 }
             }
         },
         onSuccessUpdateEmail={
-            "#send": {
+            "#test": {
                 "mailboxIds/"+DRAFTS_ID: None,
                 "mailboxIds/"+SENT_ID: True,
                 "keywords/$draft": None
