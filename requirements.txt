@@ -2,6 +2,7 @@ aiofiles
 aiohttp
 aioimaplib
 aiosmtplib
+lxml
 orjson
 starlette
 uvicorn

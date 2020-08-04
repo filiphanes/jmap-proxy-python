@@ -1,9 +1,10 @@
 from email.header import decode_header, make_header
 from email.message import EmailMessage
 from email.utils import format_datetime, parsedate_to_datetime
+from io import BytesIO
+import lxml
 from email._parseaddr import AddressList
 import re
-
 
 MEDIA_MAIN_TYPES = {'image', 'audio', 'video'}
 
@@ -128,8 +129,22 @@ def parseStructure(parts, multipartType, inAlternative):
 
 
 def htmltotext(html):
-    # TODO: remove html tags ...
-    return html
+    doc = lxml.etree.html.fromstring(html)
+    doc = lxml.etree.html.clean_html(doc)
+    return doc.text_content()
+
+def htmlpreview(html, maxlen=256, tags=('title','p','div','span','a','li','b','strong','code')):
+    preview = ''
+    if hasattr(html, 'encode'):
+        html = html.encode()
+    for e, elem in lxml.etree.iterparse(BytesIO(html), events=("end",), tag=tags, no_network=True, remove_blank_text=True, remove_comments=True, remove_pis=True, html=True):
+        if elem.tag in tags:
+            text = elem.text.strip()
+            if text:
+                preview += text + ' '
+                if len(preview) > maxlen:
+                    break
+    return preview[:maxlen]
 
 
 def format_email_header(a):

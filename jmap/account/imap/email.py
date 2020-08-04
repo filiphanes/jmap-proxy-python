@@ -4,7 +4,8 @@ from email.policy import default
 import re
 
 from .aioimaplib import unquoted
-from jmap.parse import asAddresses, asDate, asMessageIds, asText, bodystructure, htmltotext, make, parseStructure
+from jmap.parse import asAddresses, asDate, asMessageIds, asText, bodystructure, htmltotext, make, parseStructure, \
+    htmlpreview
 
 KEYWORD2FLAG = {
     '$answered':'\\Answered',
@@ -100,10 +101,10 @@ class ImapEmail(dict):
             pass
         for part in self['bodyValues'].values():
             if part['type'] == 'text/plain':
-                return part['value'][:256]
+                return part['value'].strip()[:256]
         for part in self['bodyValues'].values():
             if part['type'] == 'text/html':
-                return htmltotext(part['value'])[:256]
+                return htmlpreview(part['value'], 256)
         return None
 
     def receivedAt(self):

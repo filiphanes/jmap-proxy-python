@@ -456,14 +456,13 @@ class ImapAccount:
             if 'textBody' in msg and 'htmlBody' not in msg and not msg['textBody']:
                 data['textBody'] = htmltotext(msg['htmlBody'])
             if 'bodyValues' in properties:
-                # if fetchHTMLBodyValues:
-                #     data['bodyValues'] = {k: v for k, v in msg['bodyValues'].items() if v['type'] == 'text/html'}
-                # elif fetchTextBodyValues:
-                #     data['bodyValues'] = {k: v for k, v in msg['bodyValues'].items() if v['type'] == 'text/plain'}
-                # elif fetchAllBodyValues:
-                #     data['bodyValues'] = msg['bodyValues']
-                # jmap-demo-webmail needs all bodyValues even when fetchHTMLBodyValues=True
-                data['bodyValues'] = msg['bodyValues']
+                # bug: jmap-demo-webmail needs all bodyValues even when fetchHTMLBodyValues=True
+                if fetchHTMLBodyValues:
+                    data['bodyValues'] = {k: v for k, v in msg['bodyValues'].items() if v['type'] == 'text/html'}
+                elif fetchTextBodyValues:
+                    data['bodyValues'] = {k: v for k, v in msg['bodyValues'].items() if v['type'] == 'text/plain'}
+                elif fetchAllBodyValues:
+                    data['bodyValues'] = msg['bodyValues']
                 if maxBodyValueBytes:
                     for k, bodyValue in data['bodyValues'].items():
                         if len(bodyValue['value']) > maxBodyValueBytes:
