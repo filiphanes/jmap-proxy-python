@@ -13,6 +13,11 @@ class SmtpAccountMixin:
         self.smtp_host = smtp_host
         self.smtp_port = smtp_port
         self.email = email or username
+        self.capabilities["urn:ietf:params:jmap:submission"] = {
+            "submissionExtensions": [],
+            "maxDelayedSend": 44236800  # 512 days
+        },
+
         self.identities = {
             self.smtp_user: {
                 'id': self.smtp_user,

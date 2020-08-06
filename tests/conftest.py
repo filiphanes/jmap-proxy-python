@@ -3,19 +3,19 @@ import asyncio
 import pytest
 
 
-@pytest.fixture(scope='session')
+@pytest.fixture()
 def event_loop():
     loop = asyncio.get_event_loop()
     yield loop
     loop.close()
 
 
-@pytest.fixture(scope='module')
+@pytest.fixture()
 def accountId():
     return 'u1'
 
 
-@pytest.fixture(scope='module')
+@pytest.fixture()
 @pytest.mark.asyncio
 async def user(accountId, event_loop):
     from user import User
@@ -24,7 +24,7 @@ async def user(accountId, event_loop):
     return user
 
 
-@pytest.fixture(scope='module')
+@pytest.fixture()
 def account(user, accountId):
     return user.get_account(accountId)
 
@@ -35,8 +35,28 @@ def idmap():
     return IdMap({})
 
 
-@pytest.fixture(scope='module')
+@pytest.fixture()
 def req(user):
     from starlette.requests import Request
     scope = {'type': 'http', 'user': user}
     return Request(scope)
+
+
+@pytest.fixture()
+def inbox_id():
+    return "988f1121e9afae5e81cb000039771c66"
+
+
+@pytest.fixture()
+def uidvalidity():
+    return 1596626536
+
+
+@pytest.fixture()
+def email_id(uidvalidity):
+    return f"{uidvalidity}-100"
+
+
+@pytest.fixture()
+def email_id2(uidvalidity):
+    return f"{uidvalidity}-101"

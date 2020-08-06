@@ -1,5 +1,4 @@
 import email
-from email.message import EmailMessage
 from email.policy import default
 import re
 
@@ -62,10 +61,12 @@ class ImapEmail(dict):
                 return self['DECODEDHEADERS']
 
     def blobId(self):
-        return self['EMAILID'][0]
+        return self['X-GUID']
+        # TODO: return self['EMAILID'][0]
 
     def threadId(self):
-        return self['EMAILID'][0]  # TODO: self['THREADID']
+        return self['X-GUID']
+        # TODO: self['THREADID'][0]
 
     def hasAttachment(self):
         # Dovecot with mail_attachment_detection_options = add-flags-on-save
@@ -156,6 +157,18 @@ class ImapEmail(dict):
         self._parseStructure()
         return self['attachments']
 
+    def deleted(self):
+        # True is set by instantiator
+        return False
+
+    def created(self):
+        "Get state when this message was created"
+        return EmailState(*parse_email_id(self['id']), 1 << 64)
+
+    def updated(self):
+        "Get state when this message was udpated"
+        return EmailState(*parse_email_id(self['id'][1]), self['MODSEQ'])
+
     # Used when creating message
     def FLAGS(self):
         return [keyword2flag(kw) for kw in self['keywords']]
@@ -163,58 +176,50 @@ class ImapEmail(dict):
     def RFC822(self, blobs):
         return make(self, blobs)
 
-    def deleted(self):
-        # True is set by instantiator
-        return False
-
-    def created(self):
-        "Get state when this message was created"
-        return EmailState(parse_email_id(self['id']), 1 << 64)
-
-    def updated(self):
-        "Get state when this message was udpated"
-        return EmailState(parse_email_id(self['id']), self['MODSEQ'])
-
 # Define address getters
-# "from" is python reserved keyword, others are similar
 def address_getter(field):
     def get(self):
         self[field] = asAddresses(self.get_header(field))
         return self[field]
     return get
 
+# "from" is python reserved keyword, others are similar
 for prop in ('from', 'to', 'cc', 'bcc', 'sender'):
     setattr(ImapEmail, prop, address_getter(prop))
 
 
 class EmailState:
-    __slots__ = ('uid', 'modseq')
+    __slots__ = ('uidvalidity', 'uid', 'modseq')
 
     @classmethod
     def from_str(cls, state):
-        uid, modseq = state.split(',')
-        return cls(int(uid), int(modseq))
+        uidvalidity, uid, modseq = state.split(',')
+        return cls(int(uidvalidity), int(uid), int(modseq))
 
-    def __init__(self, uid, modseq):
+    def __init__(self, uidvalidity, uid, modseq):
+        self.uidvalidity = uidvalidity
         self.uid = uid
         self.modseq = modseq
 
     def __gt__(self, other):
         if isinstance(other, str):
             other = EmailState.from_str(other)
-        return (self.uid, self.modseq) > (other.uid, other.modseq)
+        return (self.uidvalidity, self.uid, self.modseq) > \
+               (other.uidvalidity, other.uid, other.modseq)
 
     def __le__(self, other):
         if isinstance(other, str):
             other = EmailState.from_str(other)
-        return (self.uid, self.modseq) <= (other.uid, other.modseq)
+        return (self.uidvalidity, self.uid, self.modseq) <= \
+               (other.uidvalidity, other.uid, other.modseq)
 
     def __str__(self):
         return f"{self.uid},{self.modseq}"
 
 
-format_email_id = str
-parse_email_id = int
+def parse_email_id(self, id):
+    uidvalidity, uid = id.split('-')
+
 
 # def format_email_id(mailboxid, uidvalidity, uid):
 #     "creates message id from components"

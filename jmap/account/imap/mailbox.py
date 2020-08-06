@@ -14,7 +14,6 @@ ROLE_MAP = {
   'bulk mail': 'junk',
   'junk': 'junk',
   'junk mail': 'junk',
-  'junk': 'spam',
   'spam mail': 'junk',
   'spam messages': 'junk',
 
@@ -33,6 +32,7 @@ ROLE_MAP = {
   '\\spam': 'junk',
   '\\archive': 'archive',
   '\\drafts': 'drafts',
+  '\\all': 'all',
 }
 
 

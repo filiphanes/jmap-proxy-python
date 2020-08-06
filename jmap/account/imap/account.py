@@ -2,97 +2,24 @@ import asyncio
 import itertools
 from datetime import datetime
 import re
+from operator import itemgetter
 
 from jmap import errors
 from jmap.core import MAX_OBJECTS_IN_GET
 from jmap.parse import asAddresses, asDate, asGroupedAddresses, asMessageIds, asRaw, asText, asURLs, htmltotext
 from .aioimaplib import IMAP4, parse_list_status, parse_esearch, parse_status, parse_fetch, iter_messageset, \
     encode_messageset, parse_thread, unquoted, quoted
-from .email import ImapEmail, EmailState, format_email_id, parse_email_id, keyword2flag
+from .email import ImapEmail, EmailState, keyword2flag
 from .mailbox import ImapMailbox
 
-ALL_MAILBOX_PROPERTIES = {
-    'id', 'name', 'parentId', 'role', 'sortOrder', 'isSubscribed',
-    'totalEmails', 'unreadEmails', 'totalThreads', 'unreadThreads',
-    'myRights',
-}
-
-ALL_PROPERTIES = {
-    'id', 'blobId', 'threadId', 'mailboxIds',
-    'hasAttachemnt', 'keywords', 'subject',
-    'sentAt', 'receivedAt', 'size',
-    'from', 'to', 'cc', 'bcc', 'replyTo',
-    'messageId', 'inReplyTo', 'references', 'sender',
-    'attachments', 'hasAttachment', 'headers', 'preview',
-    'textBody', 'htmlBody', 'bodyValues', 'references',
-    # 'body'
-}
-ALL_BODY_PROPERTIES = {
-    "partId", "blobId", "size", "name", "type",
-    "charset", "disposition", "cid", "language", "location",
-}
-
-FIELDS_MAP = {
-    'id':           'UID',
-    'blobId':       'EMAILID',  # OBJECTID imap extension
-    'threadId':     'EMAILID',
-    'mailboxIds':   'X-MAILBOX',  # Dovecot
-    'hasAttachment': 'FLAGS',
-    # 'hasAttachment':'RFC822',  # when server don't set $HasAttachment flag
-    'keywords':     'FLAGS',
-    'preview':      'PREVIEW',
-    'receivedAt':   'INTERNALDATE',
-    'size':         'RFC822.SIZE',
-    'attachments':  'RFC822',
-    'bodyStructure':'RFC822',
-    'bodyValues':   'RFC822',
-    'textBody':     'RFC822',
-    'htmlBody':     'RFC822',
-    'messageId':    'RFC822.HEADER',
-    'headers':      'RFC822.HEADER',
-    'sender':       'RFC822.HEADER',
-    'subject':      'RFC822.HEADER',
-    'from':         'RFC822.HEADER',
-    'to':           'RFC822.HEADER',
-    'cc':           'RFC822.HEADER',
-    'bcc':          'RFC822.HEADER',
-    'replyTo':      'RFC822.HEADER',
-    'inReplyTo':    'RFC822.HEADER',
-    'sentAt':       'RFC822.HEADER',
-    'references':   'RFC822.HEADER',
-    'created':      'UID',
-    'updated':      'MODSEQ',
-    'deleted':      'MODSEQ',
-}
-
-
-header_prop_re = re.compile(r'^header:([^:]+)(?::as(\w+))?(:all)?')
-
-HEADER_FORMS = {
-    None: asRaw,
-    'Raw': asRaw,
-    'Date': asDate,
-    'Text': asText,
-    'URLs': asURLs,
-    'Addresses': asAddresses,
-    'GroupedAddresses': asGroupedAddresses,
-    'MessageIds': asMessageIds,
-}
 
 class ImapAccount:
-    """
-    JMAP Account which uses IMAP as backend
-    """
+    """JMAP user Account using IMAP as backend"""
 
     def __init__(self, username, password='h', host='localhost', port=143, loop=None):
         self.id = username
         self.name = username
         self.capabilities = {
-            "urn:ietf:params:jmap:vacationresponse": {},
-            "urn:ietf:params:jmap:submission": {
-                "submissionExtensions": [],
-                "maxDelayedSend": 44236800  # 512 days
-            },
             "urn:ietf:params:jmap:mail": {
                 "maxSizeMailboxName": 490,
                 "maxSizeAttachmentsPerEmail": 50000000,
@@ -119,6 +46,7 @@ class ImapAccount:
         self.blobs = {}
         self.loop = loop or asyncio.get_running_loop()
         self.imap = IMAP4(host, port, loop=self.loop, timeout=600)
+        self.imapname_all = 'virtual/All'
 
     async def ainit(self):
         """Asynchronously connects to imap class"""
@@ -126,22 +54,33 @@ class ImapAccount:
         await self.imap.login(self.username, self.password)
         await self.imap.enable("UTF8=ACCEPT")
         await self.imap.enable("QRESYNC")
-        await self.imap.select('virtual/All')
-        await self.sync_mailboxes()
+        await self.fill_mailboxes({'imapname'})
+        # find \All mailbox
+        for mailbox in self.mailboxes.values():
+            if '\\all' in mailbox['flags']:
+                self.imapname_all = quoted(mailbox['imapname'])
+                break
+
+        ok, lines = await self.imap.select(self.imapname_all)
+        if ok != 'OK':
+            raise Exception(f"Mailbox {self.imapname_all} needs to be selectable.")
+        for line in lines:
+            match = uidvalidity_re.search(line)
+            if match:
+                self.uidvalidity = int(match.group(1))
+                break
+        else:
+            raise Exception('UIDVALIDITY for virtual/All not found.')
 
     async def mailbox_get(self, idmap, ids=None, properties=None):
-        """
-        https://jmap.io/spec-mail.html#mailboxget
-        https://jmap.io/spec-core.html#get
-        """
+        """https://jmap.io/spec-mail.html#mailboxget"""
         if properties is None:
             properties = ALL_MAILBOX_PROPERTIES
         else:
             properties = set(properties)
-            if properties - ALL_MAILBOX_PROPERTIES:
+            if not properties.issubset(ALL_MAILBOX_PROPERTIES):
                 raise errors.invalidArguments('Invalid argument requested')
-            properties.add('id')
-        await self.sync_mailboxes(properties)
+        await self.fill_mailboxes(properties)
 
         notFound = []
         if ids:
@@ -166,10 +105,7 @@ class ImapAccount:
 
     async def mailbox_set(self, idmap, ifInState=None, create=None, update=None, destroy=None,
                           onDestroyRemoveEmails=False):
-        """
-        https://jmap.io/spec-mail.html#mailboxset
-        https://jmap.io/spec-core.html#set
-        """
+        """https://jmap.io/spec-mail.html#mailboxset"""
         oldState = await self.mailbox_state()
         if ifInState is not None and ifInState != oldState:
             raise errors.stateMismatch()
@@ -179,16 +115,20 @@ class ImapAccount:
         notCreated = {}
         created_imapnames = {}
         for cid, mailbox in (create or {}).items():
+            mbox = ImapMailbox(mailbox)
+            mbox.db = self
             try:
-                mbox = ImapMailbox(mailbox)
-                mbox.db = self
                 imapname = mbox['imapname']
-                ok, lines = await self.imap.create(imapname)
+            except KeyError:
+                raise errors.notFound("Parent mailbox not found")
+            try:
+                ok, lines = await self.imap.create(quoted(imapname))
                 if ok != 'OK':
                     if '[ALREADYEXISTS]' in lines[0]:
                         raise errors.invalidArguments(lines[0])
                     else:
                         raise errors.serverFail(lines[0])
+                # OBJECTID extension returns MAILBOXID on create
                 match = re.search(r'\[MAILBOXID \(([^)]+)\)\]', lines[0])
                 if match:
                     id = match.group(1)
@@ -199,7 +139,7 @@ class ImapAccount:
                     self.byimapname[imapname] = mbox
                     created[cid] = {'id': id}
                 else:
-                    # set created[cid] after sync_mailboxes()
+                    # set created[cid] after fill_mailboxes()
                     created_imapnames[cid] = imapname
                 if not mailbox.get('isSubscribed', True):
                     ok, lines = await self.imap.unsubscribe(imapname)
@@ -230,7 +170,7 @@ class ImapAccount:
                 mailbox = self.mailboxes.get(id, None)
                 if not mailbox or mailbox['deleted']:
                     raise errors.notFound('mailbox not found')
-                ok, lines = await self.imap.delete(mailbox['imapname'])
+                ok, lines = await self.imap.delete(quoted(mailbox['imapname']))
                 if ok != 'OK':
                     raise errors.serverFail(lines[0])
                 mailbox['deleted'] = True
@@ -238,7 +178,7 @@ class ImapAccount:
             except errors.JmapError as e:
                 notDestroyed[id] = e.to_dict()
 
-        await self.sync_mailboxes()
+        await self.fill_mailboxes({'id','imapname'})
         for cid, imapname in created_imapnames.values():
             mbox = self.byimapname.get(imapname, None)
             if mbox:
@@ -259,49 +199,60 @@ class ImapAccount:
             'notDestroyed': notDestroyed,
         }
 
-    async def mailbox_query(self, sort=None, filter=None, position=0, anchor=None,
-                            anchorOffset=0, limit=None):
-        """
-        https://jmap.io/spec-mail.html#mailboxquery
-        https://jmap.io/spec-core.html#get
-        """
-        mailboxes = (mbox for mbox in self.mailboxes if not mbox['deleted'])
-        if filter:
-            mailboxes = [mbox for mbox in mailboxes if _mailbox_match(mbox, filter)]
-        if sort:
-            mailboxes = _mailbox_sort(mailboxes, sort, {'data': mailboxes})
+    async def mailbox_query(self, sort=None, filter=None, position=None, anchor=None,
+                            anchorOffset=0, limit=None, calculateTotal=False):
+        """https://jmap.io/spec-mail.html#mailboxquery"""
+        position, limit2, sort, filter = _validate_query(position, limit, sort, filter)
 
-        start = position
+        mailboxes = [b for b in self.mailboxes.values() if not b['deleted']]
+        total = len(mailboxes)
+
+        for prop, value in filter.items():
+            # TODO: FilterOperator AND, OR, NOT
+            try:
+                filter_func = MAILBOX_FILTERS[prop]
+            except KeyError:
+                raise errors.unsupportedFilter(f"Unknown filter {prop}")
+            mailboxes = (b for b in mailboxes if filter_func(b, value))
+
+        # python sort is stable so we can make consecutive
+        # sorts in reversed order to get complex sort
+        for key in reversed(sort):
+            mailboxes = sorted(
+                mailboxes,
+                key=itemgetter(key['property']),
+                reverse=not key.get('isAscending', True),
+            )
+
+        ids = [b['id'] for b in mailboxes]
         if anchor:
             # need to calculate the position
-            for i, x in enumerate(mailboxes):
-                if x['id'] == anchor:
-                    start = i + anchorOffset
+            for position, id in enumerate(mailboxes):
+                if id == anchor:
+                    position = max(position + anchorOffset, 0)
                     break
             else:
                 raise errors.anchorNotFound()
+        elif position < 0:
+            position = max(position + total, 0)
 
-        if limit:
-            end = start + limit - 1
-        else:
-            end = len(mailboxes)
+        ids = ids[position:position + limit2]
 
-        return {
+        out = {
             'accountId': self.id,
-            'filter': filter,
-            'sort': sort,
             'queryState': await self.mailbox_state(),
             'canCalculateChanges': False,
-            'position': start,
-            'total': len(mailboxes),
-            'ids': [x['id'] for x in mailboxes[start:end]],
+            'position': position,
+            'ids': ids,
         }
+        if calculateTotal:
+            out['total'] = total
+        if limit != limit2:
+            out['limit'] = limit2
+        return out
 
     async def mailbox_changes(self, sinceState, maxChanges=None):
-        """
-        https://jmap.io/spec-mail.html#mailboxchanges
-        https://jmap.io/spec-core.html#changes
-        """
+        """https://jmap.io/spec-mail.html#mailboxchanges"""
         new_state = await self.mailbox_state()
         if sinceState <= await self.mailbox_state_low():
             raise errors.cannotCalculateChanges({'new_state': new_state})
@@ -338,18 +289,14 @@ class ImapAccount:
                                   "unreadThreads"] if only_counts else None,
         }
 
-    async def email_query(self, sort={}, filter={},
-                          position=None, anchor=None, anchorOffset=None, limit: int = 10000,
+    async def email_query(self, sort=None, filter=None,
+                          position=None, limit=None,
+                          anchor=None, anchorOffset=None,
                           collapseThreads=False, calculateTotal=False):
-        start = position or 0
-        if anchor:
-            if position is not None:
-                raise errors.invalidArguments("anchor and position can't ")
-        elif anchorOffset is not None:
-            raise errors.invalidArguments("anchorOffset need anchor")
+        position, limit2, sort, filter = _validate_query(position, limit, sort, filter)
 
-        sort_criteria = as_imap_sort(sort) if sort else None
         search_criteria = self.as_imap_search(filter)
+        sort_criteria = as_imap_sort(sort)
         if collapseThreads:
             ok, lines = await self.imap.uid_thread('REFS', search_criteria.decode())
             threads = parse_thread(lines[:1])
@@ -357,36 +304,51 @@ class ImapAccount:
             if threads:
                 search_criteria += b' UID %s' % encode_messageset((int(t[0]) for t in threads))
         if sort_criteria:
-            ok, lines = await self.imap.uid_sort(sort_criteria.decode(), search_criteria.decode(), ret='ALL')
+            ok, lines = await self.imap.uid_sort(sort_criteria.decode(), search_criteria.decode(), ret='ALL COUNT')
         elif search_criteria:
             ok, lines = await self.imap.uid_search(search_criteria.decode(), ret='ALL COUNT')
-        uids = parse_esearch(lines).get('ALL', '')
+        result = parse_esearch(lines)
+        uidset = result.get('ALL', '')
+        total = int(result.get('COUNT', 0))
 
-        ids = [format_email_id(uid) for uid in iter_messageset(uids)]
         if anchor:
             # need to calculate position
             try:
-                start = ids.index(anchor) + (anchorOffset or 0)
-                if start < 0:
-                    start = 0
+                anchor_uid = self.parse_email_id(anchor)
             except ValueError:
                 raise errors.anchorNotFound()
+            for position, uid in enumerate(iter_messageset(uidset)):
+                if uid == anchor_uid:
+                    if type(anchorOffset) is int:
+                        position = max(position + anchorOffset, 0)
+                    elif anchorOffset is not None:
+                        raise errors.invalidArguments('anchorOffset is not int')
+                    break
+            else:
+                raise errors.anchorNotFound()
+        elif position < 0:
+            position = max(position + total, 0)
 
-        end = start + limit
-        if start < 0 <= end:
-            end = len(ids)
+        if position < total:
+            uids = iter_messageset(uidset)
+            uids = itertools.islice(uids, position, position + limit)
+            ids = list(self.format_email_id(uid) for uid in uids)
+        else:
+            ids = []
 
-        return {
+        out = {
             'accountId': self.id,
-            'filter': filter,
-            'sort': sort,
-            'collapseThreads': collapseThreads,
             'queryState': await self.email_state(),
             'canCalculateChanges': False,
-            'position': start,
-            'ids': ids[start:end],
-            'total': len(ids),
+            'position': position,
+            'ids': ids,
+            'collapseThreads': collapseThreads,
         }
+        if calculateTotal:
+            out['total'] = total
+        if limit != limit2:
+            out['limit'] = limit2
+        return out
 
     async def email_get(self, idmap,
                         ids=None,
@@ -396,52 +358,47 @@ class ImapAccount:
                         fetchHTMLBodyValues=False,
                         fetchAllBodyValues=False,
                         maxBodyValueBytes=0,
-                        _prefetch=(),
                     ):
-        """
-        https://jmap.io/spec-mail.html#emailget
-        https://jmap.io/spec-core.html#get
-        """
+        """https://jmap.io/spec-mail.html#emailget"""
         lst = []
         notFound = []
-        simple_props = set()
+        fill_props = set()
         header_props = set()
         if properties:
             for prop in properties:
                 m = header_prop_re.match(prop)
-                if m:
+                if m is None:
+                    fill_props.add(prop)
+                else:
                     header_props.add(m.group(0, 1, 2, 3))
-                    simple_props.add('headers')
-                else:
-                    simple_props.add(prop)
-            for prop in _prefetch:
-                if header_prop_re.match(prop):
-                    simple_props.add('headers')
-                else:
-                    simple_props.add(prop)
-            if 'body' in simple_props:
-                simple_props.remove('body')
-                simple_props.add('textBody')
-                simple_props.add('htmlBody')
+                    fill_props.add('headers')
+            if 'body' in fill_props:
+                fill_props.remove('body')
+                fill_props.update(('textBody', 'htmlBody'))
         else:
             properties = ALL_PROPERTIES
+            fill_props = set(properties)
 
         if bodyProperties is None:
             bodyProperties = ALL_BODY_PROPERTIES
 
         if header_props and 'headers' not in properties:
-            simple_props.remove('headers')
+            fill_props.remove('headers')
 
         if ids is None:
             # get MAX_OBJECTS_IN_GET
             ok, lines = await self.imap.search('ALL', ret='ALL')
-            messageset = parse_esearch(lines).get('ALL', '')
-            ids = map(format_email_id, iter_messageset(messageset))
+            if ok != 'OK':
+                raise errors.serverFail('\n'.join(lines))
+            uids = iter_messageset(parse_esearch(lines).get('ALL', ''))
+            ids = (self.format_email_id(uid) for uid in uids)
             ids = tuple(itertools.islice(ids, MAX_OBJECTS_IN_GET))
         elif len(ids) > MAX_OBJECTS_IN_GET:
             raise errors.tooLarge('Requested more than {MAX_OBJECTS_IN_GET} ids')
+        else:
+            ids = [idmap.get(id) for id in ids]
 
-        await self.fill_emails(simple_props, ids)
+        await self.fill_emails(fill_props, ids)
 
         for id in ids:
             try:
@@ -451,7 +408,7 @@ class ImapAccount:
                 continue
 
             # Fill most of msg properties except header:*
-            data = {prop: msg[prop] for prop in simple_props}
+            data = {prop: msg[prop] for prop in fill_props}
             data['id'] = msg['id']
             if 'textBody' in msg and 'htmlBody' not in msg and not msg['textBody']:
                 data['textBody'] = htmltotext(msg['htmlBody'])
@@ -518,8 +475,8 @@ class ImapAccount:
                     flags = "(%s)" % (''.join(msg['FLAGS']))
                     ok, lines = await self.imap.append(body, mailbox['imapname'], flags)
                     match = re.search(r'\[APPENDUID (\d+) (\d+)\]', lines[0])
-                    # TODO: FETCH UID and EMAILID
-                    id = format_email_id(int(match.group(2)))
+                    # TODO: FETCH UID and X-GUID
+                    id = self.format_email_id(int(match.group(2)))
                     created[cid] = {'id': id, 'blobId': msg['blobId']}
                     idmap.set(cid, id)
                 except errors.JmapError as e:
@@ -551,13 +508,13 @@ class ImapAccount:
             ids = [idmap.get(id) for id in update.keys()]
             for id in ids:
                 try:
-                    uids.append(parse_email_id(ids))
+                    uids.append(self.parse_email_id(id))
                 except ValueError:
                     notDestroyed[id] = errors.notFound().to_dict()
 
-            messageset = encode_messageset(uids).encode()
-            await self.imap.uid_store(messageset, '+FLAGS', '(\\Deleted)')
-            await self.imap.uid_expunge(messageset)
+            uidset = encode_messageset(uids).encode()
+            await self.imap.uid_store(uidset, '+FLAGS', '(\\Deleted)')
+            await self.imap.uid_expunge(uidset)
             for id in ids:
                 self.emails.pop(id, None)
                 destroyed.append(id)
@@ -588,7 +545,7 @@ class ImapAccount:
             '(CHANGEDSINCE %s VANISHED)' % state.modseq
         )
         if lines[0].startswith('(EARLIER) '):
-            removed = [format_email_id(uid)
+            removed = [self.format_email_id(uid)
                        for uid in iter_messageset(lines[0][10:])]
             lines = lines[1:]
         else:
@@ -598,10 +555,11 @@ class ImapAccount:
         updated = []
         for seq, data in parse_fetch(lines[:-1]):
             uid = int(data['UID'])
+            id = self.format_email_id(uid)
             if uid > state.uid:
-                created.append(format_email_id(uid))
+                created.append(id)
             else:
-                updated.append(format_email_id(uid))
+                updated.append(id)
 
         # TODO: create intermediate state
         if maxChanges and len(removed) + len(created) + len(updated) > maxChanges:
@@ -623,17 +581,17 @@ class ImapAccount:
 
         if ids is None:
             ok, lines = await self.imap.uid_search('ALL', ret='ALL')
-            messageset = parse_esearch(lines).get('ALL', '')
+            uidset = parse_esearch(lines).get('ALL', '')
         else:
             ids = [idmap.get(id) for id in ids]
             search = self.as_imap_search({'threadIds': ids}).decode()
             ok, lines = await self.imap.uid_search(search, ret='ALL')
-            messageset = parse_esearch(lines).get('ALL', '')
-        if messageset:
-            # ok, lines = await self.imap.uid_thread('REFS', 'UID %s' % messageset)
+            uidset = parse_esearch(lines).get('ALL', '')
+        if uidset:
+            # ok, lines = await self.imap.uid_thread('REFS', 'UID %s' % uidset)
             # threads = parse_thread(lines)
             # await self.fill_emails(['blobId'], [t[0] for t in threads])
-            ids = [format_email_id(uid) for uid in iter_messageset(messageset)]
+            ids = [self.format_email_id(uid) for uid in iter_messageset(uidset)]
             await self.fill_emails(['blobId'], ids)
             for id in ids:
                 try:
@@ -652,8 +610,8 @@ class ImapAccount:
     async def download(self, blobId):
         search = self.as_imap_search({'blobId': blobId})
         ok, lines = self.imap.uid_search(search, ret='ALL')
-        messageset = parse_esearch(lines)
-        for uid in messageset:
+        uidset = parse_esearch(lines)
+        for uid in uidset:
             ok, lines = self.imap.uid_fetch(str(uid), '(RFC822)')
             for seq, data in parse_fetch(lines[:-1]):
                 return data['RFC822']
@@ -691,7 +649,8 @@ class ImapAccount:
                     date = datetime.now()
                 ok, lines = self.imap.append(body, imapname, flags, date)
                 match = re.search(r'\[APPENDUID (\d+) (\d+)\]', lines[0])
-                created[id] = format_email_id(int(match.group(2)))
+                # TODO: use uidvalidity,uid from \All mailbox
+                created[id] = self.format_email_id(int(match.group(1)), int(match.group(2)))
             except errors.JmapError as e:
                 notCreated[id] = e.to_dict()
             except Exception as e:
@@ -712,16 +671,16 @@ class ImapAccount:
 
     async def email_state(self):
         "Return current Mailbox state"
-        ok, lines = await self.imap.status('virtual/All', '(UIDNEXT HIGHESTMODSEQ)')
+        ok, lines = await self.imap.status(self.imapname_all, '(UIDNEXT HIGHESTMODSEQ)')
         status = parse_status(lines)
-        return str(EmailState(int(status['UIDNEXT']), int(status['HIGHESTMODSEQ'])))
+        return str(EmailState(self.uidvalidity, int(status['UIDNEXT']), int(status['HIGHESTMODSEQ'])))
 
     async def email_state_low(self):
         return '1'
 
     async def mailbox_state(self):
         "Return current Mailbox state"
-        await self.sync_mailboxes()
+        await self.fill_mailboxes({'created'})
         return self._mailbox_state
 
     async def mailbox_state_low(self):
@@ -750,32 +709,37 @@ class ImapAccount:
         fetch_fields = set()
         for id in ids:
             try:
-                uid = parse_email_id(id)
+                uid = self.parse_email_id(id)
             except ValueError:
                 continue
             msg = self.emails.get(id, None)
-            if msg is not None:
+            if msg is None:
+                fetch_uids.add(uid)
+                fetch_fields = fields
+            else:
                 missing = fields - msg.keys()
                 if missing:
                     fetch_uids.add(uid)
                     fetch_fields.update(missing)
-            else:
-                fetch_uids.add(uid)
-                fetch_fields = fields
 
         if not fetch_fields:
             return
         fetch_fields.add('UID')
         fetch_uids = encode_messageset(fetch_uids).decode()
         ok, lines = await self.imap.uid_fetch(fetch_uids, "(%s)" % (' '.join(fetch_fields)))
+        if ok != 'OK':
+            raise errors.serverFail(lines[0])
         for seq, data in parse_fetch(lines[:-1]):
-            id = data['UID']  # format_email_id
+            id = self.format_email_id(data['UID'])
             msg = self.emails.get(id, None)
             if not msg:
                 msg = ImapEmail(id=id)
                 self.emails[id] = msg
             if 'mailboxIds' in properties:
-                imapname = unquoted(data['X-MAILBOX'])
+                try:
+                    imapname = unquoted(data['X-MAILBOX'])
+                except KeyError:
+                    raise  # some weird error
                 msg['mailboxIds'] = [self.byimapname[imapname]['id']]
             msg.update(data)
 
@@ -812,11 +776,11 @@ class ImapAccount:
                 else:
                     raise errors.invalidArguments(f"Unknown update {path}")
 
-        # uid = parse_email_id(id) # following lines uses directly id
+        uidset = str(self.parse_email_id(msg['id']))
         if flags_add:
-            await self.imap.uid_store(msg['id'], '+FLAGS', f"({' '.join(flags_add)})")
+            await self.imap.uid_store(uidset, '+FLAGS', f"({' '.join(flags_add)})")
         if flags_del:
-            await self.imap.uid_store(msg['id'], '-FLAGS', f"({' '.join(flags_del)})")
+            await self.imap.uid_store(uidset, '-FLAGS', f"({' '.join(flags_del)})")
 
         if mids_add or mids_del:
             if flags_add or flags_del:
@@ -826,18 +790,18 @@ class ImapAccount:
             raise error("This implementation don't support Email/set mailboxIds, use Email/copy")
 
 
-    async def sync_mailboxes(self, fields=None):
+    async def fill_mailboxes(self, fields=None):
         deleted_ids = set(self.mailboxes.keys())
         if fields is None:
             fields = {'totalEmails', 'unreadEmails', 'totalThreads', 'unreadThreads'}
         new_state = now_state()
-        ok, lines = await self.imap.list(ret='SPECIAL-USE SUBSCRIBED STATUS (MESSAGES MAILBOXID)')
+        ok, lines = await self.imap.list(ret='SPECIAL-USE SUBSCRIBED STATUS (MESSAGES X-GUID)')
         for flags, sep, imapname, status in parse_list_status(lines):
             imapname = unquoted(imapname)
             flags = set(f.lower() for f in flags)
-            if '\\noselect' in flags:
+            if flags.intersection({'\\noselect', '\\nonexistent'}):
                 continue
-            id = status['MAILBOXID'][1:-1]
+            id = status['X-GUID']
             mailbox = self.mailboxes.get(id, None)
             if mailbox:
                 deleted_ids.remove(id)
@@ -897,7 +861,7 @@ class ImapAccount:
 
         if renamefrom:
             renameto = mailbox['imapname']
-            ok, lines = await self.imap.rename(renamefrom, renameto)
+            ok, lines = await self.imap.rename(quoted(renamefrom), quoted(renameto))
             if ok != 'OK':
                 raise errors.serverFail(lines[0])
 
@@ -973,7 +937,7 @@ class ImapAccount:
                     for id in value:
                         if i > 1:
                             out += b' OR'
-                        out += b' EMAILID '
+                        out += b' X-GUID '
                         out += id.encode()
                         i -= 1
                     out += b' '
@@ -991,6 +955,122 @@ class ImapAccount:
             out.pop()
         return out
 
+    def parse_email_id(self, id):
+        try:
+            uidvalidity, uid = map(int, id.split('-'))
+        except AttributeError:
+            raise ValueError()
+        if uidvalidity != self.uidvalidity or not 2**32 > uid > 0:
+            raise ValueError()
+        return uid
+
+    def format_email_id(self, uid):
+        return f'{self.uidvalidity}-{uid}'
+
+
+def _validate_query(position, limit, sort, filter):
+    if position is None:
+        position = 0
+    elif type(position) is not int:
+        raise errors.invalidArguments('position is not int or null')
+    if limit is None:
+        limit = 1000
+    elif type(limit) is not int or limit < 0:
+        raise errors.invalidArguments('limit is not unsigned int or null')
+    elif limit > 1000:
+        limit = 1000
+    if sort is None:
+        sort = ()
+    elif type(sort) is not list:
+        raise errors.invalidArguments('sort MUST be list or null')
+    if filter is None:
+        filter = {}
+    elif type(filter) is not dict:
+        raise errors.invalidArguments('filter MUST be list or null')
+    return position, limit, sort, filter
+
+
+header_prop_re = re.compile(r'^header:([^:]+)(?::as(\w+))?(:all)?')
+uidvalidity_re = re.compile(r'\[UIDVALIDITY ([0-9]+)\]', re.I)
+
+ALL_MAILBOX_PROPERTIES = {
+    'id', 'name', 'parentId', 'role', 'sortOrder', 'isSubscribed',
+    'totalEmails', 'unreadEmails', 'totalThreads', 'unreadThreads',
+    'myRights',
+}
+
+ALL_PROPERTIES = {
+    'id', 'blobId', 'threadId', 'mailboxIds',
+    'hasAttachment', 'keywords', 'subject',
+    'sentAt', 'receivedAt', 'size',
+    'from', 'to', 'cc', 'bcc', 'replyTo',
+    'messageId', 'inReplyTo', 'references', 'sender',
+    'attachments', 'hasAttachment', 'headers', 'preview',
+    'textBody', 'htmlBody', 'bodyValues', 'references',
+    # 'body'
+}
+
+ALL_BODY_PROPERTIES = {
+    "partId", "blobId", "size", "name", "type",
+    "charset", "disposition", "cid", "language", "location",
+}
+
+FIELDS_MAP = {
+    'id':           'UID',
+
+    # OBJECTID extension
+    # 'blobId':       'EMAILID',
+    # 'threadId':     'THREADID',
+
+    # only Dovecot
+    'blobId':       'X-GUID',
+    'threadId':     'X-GUID',
+    'mailboxIds':   'X-MAILBOX',
+
+    # when server sets $HasAttachment flag
+    'hasAttachment': 'FLAGS',
+    # 'hasAttachment':'RFC822',
+
+    'keywords':     'FLAGS',
+
+    # PREVIEW=* extension https://datatracker.ietf.org/doc/draft-ietf-extra-imap-fetch-preview/
+    'preview':      'PREVIEW',
+    # 'preview':      'RFC822',
+
+    'receivedAt':   'INTERNALDATE',
+    'size':         'RFC822.SIZE',
+    'attachments':  'RFC822',
+    'bodyStructure':'RFC822',
+    'bodyValues':   'RFC822',
+    'textBody':     'RFC822',
+    'htmlBody':     'RFC822',
+    'messageId':    'RFC822.HEADER',
+    'headers':      'RFC822.HEADER',
+    'sender':       'RFC822.HEADER',
+    'subject':      'RFC822.HEADER',
+    'from':         'RFC822.HEADER',
+    'to':           'RFC822.HEADER',
+    'cc':           'RFC822.HEADER',
+    'bcc':          'RFC822.HEADER',
+    'replyTo':      'RFC822.HEADER',
+    'inReplyTo':    'RFC822.HEADER',
+    'sentAt':       'RFC822.HEADER',
+    'references':   'RFC822.HEADER',
+    'created':      'UID',
+    'updated':      'MODSEQ',
+    'deleted':      'MODSEQ',
+}
+
+HEADER_FORMS = {
+    None: asRaw,
+    'Raw': asRaw,
+    'Date': asDate,
+    'Text': asText,
+    'URLs': asURLs,
+    'Addresses': asAddresses,
+    'GroupedAddresses': asGroupedAddresses,
+    'MessageIds': asMessageIds,
+}
 
 def int2bytes(i):
     return b'%d' % i
@@ -1000,7 +1080,7 @@ def quoted_bytes(s):
 
 
 SEARCH_MAP = {
-    'blobId': (b'EMAILID', bytes),
+    'blobId': (b'X-GUID', bytes),
     'minSize': (b'NOT SMALLER', int2bytes),
     'maxSize': (b'NOT LARGER', int2bytes),
     'hasKeyword': (b'KEYWORD', keyword2flag),
@@ -1039,7 +1119,8 @@ def as_imap_sort(sort):
             out += b' '
         except KeyError:
             raise errors.unsupportedSort(f"Property {crit['property']} is not sortable")
-    out.pop()
+    if out:
+        out.pop()
     return out
 
 
@@ -1047,17 +1128,10 @@ def now_state():
     return str(int(datetime.now().timestamp()))
 
 
-def _mailbox_match(mbox, filter):
-    if 'hasRole' in filter and \
-            bool(filter['hasRole']) != bool(mbox['role']):
-        return False
-    if 'isSubscribed' in filter and \
-            bool(filter['isSubscribed']) != bool(mbox['isSubscribed']):
-        return False
-    if 'parentId' in filter and \
-            filter['parentId'] != mbox['parentId']:
-        return False
-    return True
-
-def _mailbox_sort(data, sortargs, storage):
-    return data
+MAILBOX_FILTERS = {
+    'hasAnyRole':   lambda mbox, val: bool(mbox['role']) == val,
+    'isSubscribed': lambda mbox, val: mbox['isSubscribed'] == val,
+    'name':         lambda mbox, val: val in mbox['name'],
+    'parentId':     lambda mbox, val: mbox['parentId'] == val,
+    'role':         lambda mbox, val: mbox['role'] == val,
+}
