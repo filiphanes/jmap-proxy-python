@@ -38,7 +38,7 @@ class ImapEmail(dict):
         return self['LASTHEADERS'].get(name, None)
 
     def EML(self):
-        self['EML'] = email.message_from_bytes(self['RFC822'], policy=default)
+        self['EML'] = email.message_from_bytes(self['BODY.PEEK[]'], policy=default)
         return self['EML']
 
     def LASTHEADERS(self):
@@ -50,14 +50,14 @@ class ImapEmail(dict):
 
     def DECODEDHEADERS(self):
         try:
-            self['DECODEDHEADERS'] = self['RFC822.HEADER'].decode()
+            self['DECODEDHEADERS'] = self['BODY.PEEK[HEADER]'].decode()
             # free memory but keep in dict to avoid fetching it again
-            self['RFC822.HEADER'] = None
+            self['BODY.PEEK[HEADER]'] = None
             return self['DECODEDHEADERS']
         except KeyError:
-            match = re.search(rb'\r\n\r\n', self['RFC822'])
+            match = re.search(rb'\r\n\r\n', self['BODY.PEEK[]'])
             if match:
-                self['DECODEDHEADERS'] = str(memoryview(self['RFC822'])[:match.end()])
+                self['DECODEDHEADERS'] = str(memoryview(self['BODY.PEEK[]'])[:match.end()])
                 return self['DECODEDHEADERS']
 
     def blobId(self):
@@ -124,7 +124,7 @@ class ImapEmail(dict):
         try:
             return int(self['RFC822.SIZE'])
         except KeyError:
-            return len(self['RFC822'])
+            return len(self['BODY.PEEK[]'])
 
     def subject(self):
         return asText(self.get_header('subject')) or ''
@@ -173,7 +173,7 @@ class ImapEmail(dict):
     def FLAGS(self):
         return [keyword2flag(kw) for kw in self['keywords']]
 
-    def RFC822(self, blobs):
+    def BODY(self, blobs):
         return make(self, blobs)
 
 # Define address getters

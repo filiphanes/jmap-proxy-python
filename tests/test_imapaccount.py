@@ -118,16 +118,16 @@ async def test_mailbox_query(account, inbox_id):
 
 
 @pytest.mark.asyncio
-async def test_email_query_inMailbox(account, inbox_id):
+async def test_email_query_inMailbox(account, inbox_id, email_id):
     response = await account.email_query(**{
         "filter": {"inMailbox": inbox_id},
-        "position": 0,
+        "anchor": email_id,
         "collapseThreads": False,
         "limit": 10,
         "calculateTotal": True
     })
     assert response['accountId'] == account.id
-    assert response['position'] == 0
+    assert response['position'] > 0
     assert response['total'] > 0
     assert response['collapseThreads'] == False
     assert response['queryState']
@@ -166,6 +166,7 @@ async def test_email_get(account, idmap, uidvalidity, email_id, email_id2):
         f"{uidvalidity}-{(1<<32)-1}",
         f"{uidvalidity}-0",
         f"{uidvalidity}--10",
+        f"{uidvalidity}-1e2",
         f"{uidvalidity}-str",
         1234,
     ]
@@ -173,6 +174,7 @@ async def test_email_get(account, idmap, uidvalidity, email_id, email_id2):
         idmap,
         ids=good_ids + wrong_ids,
         properties=list(properties),
+        maxBodyValueBytes=1024,
     )
     assert response['accountId'] == account.id
     assert isinstance(response['list'], list)
