@@ -6,11 +6,9 @@ try:
 except ImportError:
     import json
 
-INBOX_ID = "988f1121e9afae5e81cb000039771c66"
-EMAIL_ID = "100"
 
 @pytest.mark.asyncio
-async def test_Email_query_first_page(req):
+async def test_Email_query_first_page(req, inbox_id):
     properties = [
         "threadId", "mailboxIds", "subject", "receivedAt",
         "keywords", "hasAttachment", "from", "to", "preview",
@@ -23,7 +21,7 @@ async def test_Email_query_first_page(req):
         ["Email/query", {
             "accountId": user.username,
             "filter": {
-                "inMailbox": INBOX_ID,  # Junk
+                "inMailbox": inbox_id,
             },
             "sort": [
                 {"property": "receivedAt", "isAscending": False}
@@ -84,7 +82,7 @@ async def test_Email_query_first_page(req):
 
 
 @pytest.mark.asyncio
-async def test_Email_query_second_page(req):
+async def test_Email_query_second_page(req, inbox_id):
     properties = [
         "threadId", "mailboxIds", "subject", "receivedAt",
         "keywords", "hasAttachment", "from", "to", "preview",
@@ -96,7 +94,7 @@ async def test_Email_query_second_page(req):
         [ "Email/query", {
             "accountId": user.username,
             "filter": {
-                "inMailbox": INBOX_ID
+                "inMailbox": inbox_id
             },
             "sort": [
                 { "property": "receivedAt", "isAscending": False }

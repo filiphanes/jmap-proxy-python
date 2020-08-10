@@ -20,13 +20,13 @@ async def test_identity_get(account, idmap):
 
 
 @pytest.mark.asyncio
-async def test_emailsubmission_set(account, idmap):
+async def test_emailsubmission_set(account, idmap, email_id, inbox_id):
     response = await account.identity_set(
         idmap,
         create={
             "test": {
                 "identityId": account.id,
-                "emailId": EMAIL_ID,
+                "emailId": email_id,
                 "envelope": {
                     "mailFrom": {
                         "email": account.id,
@@ -41,8 +41,8 @@ async def test_emailsubmission_set(account, idmap):
         },
         onSuccessUpdateEmail={
             "#test": {
-                "mailboxIds/"+INBOX_ID: None,
-                "mailboxIds/"+INBOX_ID: True,
+                "mailboxIds/"+inbox_id: None,
+                "mailboxIds/"+inbox_id: True,
                 "keywords/$draft": None
             }
         }

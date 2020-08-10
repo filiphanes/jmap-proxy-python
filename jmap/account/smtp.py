@@ -42,7 +42,7 @@ class SmtpAccountMixin:
 
         for id in ids:
             try:
-                lst.append(self.identities[idmap(id)])
+                lst.append(self.identities[idmap.get(id)])
             except KeyError:
                 notFound.append(id)
 

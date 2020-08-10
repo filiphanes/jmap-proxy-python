@@ -51,8 +51,7 @@ async def test_mailbox_set_fail(account, idmap):
 
 @pytest.mark.asyncio
 async def test_mailbox_create_duplicate(account, idmap):
-    with pytest.raises(errors.invalidArguments):
-        await account.mailbox_set(
+    response = await account.mailbox_set(
             idmap,
             create={
                 "test": {
@@ -61,6 +60,7 @@ async def test_mailbox_create_duplicate(account, idmap):
                 }
             }
         )
+    assert response['notCreated']['test']['type'] == 'invalidArguments'
 
 
 @pytest.mark.asyncio
@@ -298,7 +298,7 @@ async def test_email_changes(account, uidvalidity):
 
 @pytest.mark.asyncio
 async def test_thread_changes(account, uidvalidity):
-    response = await account.thread_changes(sinceState=f"{uidvalidity},1,39", maxChanges=30)
+    response = await account.thread_changes(sinceState=f"{uidvalidity},1,10", maxChanges=30)
     changes = response['created'] + response['updated'] + response['removed']
     assert 0 < len(changes) < 30
 

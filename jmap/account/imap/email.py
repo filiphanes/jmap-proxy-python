@@ -38,7 +38,7 @@ class ImapEmail(dict):
         return self['LASTHEADERS'].get(name, None)
 
     def EML(self):
-        self['EML'] = email.message_from_bytes(self['BODY.PEEK[]'], policy=default)
+        self['EML'] = email.message_from_bytes(self['BODY[]'], policy=default)
         return self['EML']
 
     def LASTHEADERS(self):
@@ -50,14 +50,14 @@ class ImapEmail(dict):
 
     def DECODEDHEADERS(self):
         try:
-            self['DECODEDHEADERS'] = self['BODY.PEEK[HEADER]'].decode()
+            self['DECODEDHEADERS'] = self['BODY[HEADER]'].decode()
             # free memory but keep in dict to avoid fetching it again
-            self['BODY.PEEK[HEADER]'] = None
+            self['BODY[HEADER]'] = None
             return self['DECODEDHEADERS']
         except KeyError:
-            match = re.search(rb'\r\n\r\n', self['BODY.PEEK[]'])
+            match = re.search(rb'\r\n\r\n', self['BODY[]'])
             if match:
-                self['DECODEDHEADERS'] = str(memoryview(self['BODY.PEEK[]'])[:match.end()])
+                self['DECODEDHEADERS'] = str(memoryview(self['BODY[]'])[:match.end()])
                 return self['DECODEDHEADERS']
 
     def blobId(self):
@@ -124,7 +124,7 @@ class ImapEmail(dict):
         try:
             return int(self['RFC822.SIZE'])
         except KeyError:
-            return len(self['BODY.PEEK[]'])
+            return len(self['BODY[]'])
 
     def subject(self):
         return asText(self.get_header('subject')) or ''
@@ -192,7 +192,7 @@ class EmailState:
     __slots__ = ('uidvalidity', 'uid', 'modseq')
 
     @classmethod
-    def from_str(cls, state):
+    def from_string(cls, state):
         uidvalidity, uid, modseq = state.split(',')
         return cls(int(uidvalidity), int(uid), int(modseq))
 
@@ -203,18 +203,18 @@ class EmailState:
 
     def __gt__(self, other):
         if isinstance(other, str):
-            other = EmailState.from_str(other)
+            other = EmailState.from_string(other)
         return (self.uidvalidity, self.uid, self.modseq) > \
                (other.uidvalidity, other.uid, other.modseq)
 
     def __le__(self, other):
         if isinstance(other, str):
-            other = EmailState.from_str(other)
+            other = EmailState.from_string(other)
         return (self.uidvalidity, self.uid, self.modseq) <= \
                (other.uidvalidity, other.uid, other.modseq)
 
     def __str__(self):
-        return f"{self.uid},{self.modseq}"
+        return f"{self.uidvalidity},{self.uid},{self.modseq}"
 
 
 def parse_email_id(self, id):

@@ -5,6 +5,7 @@ from aiohttp.client import ClientSession
 
 from jmap import errors
 
+from starlette.datastructures import MutableHeaders
 
 class FileBlobMixin:
     chunk_size = 4096
