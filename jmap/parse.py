@@ -10,24 +10,39 @@ MEDIA_MAIN_TYPES = {'image', 'audio', 'video'}
 
 
 def asAddresses(raw):
-    return raw and [{'name': asText(n), 'email': e} for n, e in AddressList(raw).addresslist]
+    if raw:
+        return [{'name': asText(n) or None, 'email': e} for n, e in AddressList(raw.strip()).addresslist]
+    return None
 
 def asGroupedAddresses(raw):
     # TODO
-    return raw and [{'name': asText(n), 'email': e} for n, e in AddressList(raw).addresslist]
+    if raw:
+        return [{'name': asText(n), 'email': e} for n, e in AddressList(raw).addresslist]
+    return None
 
-messageid_re = re.compile(r'<("[^>]+?"|[^>]+?)>')
+messageid_re = re.compile(r'<"?([^>]+?|[^>"]+?)"?>')
 def asMessageIds(raw):
-    return raw and messageid_re.findall(raw)
+    if raw:
+        return messageid_re.findall(raw)
+    return None
 
 def asCommaList(raw):
-    return raw and re.split(r'\s*,\s*', raw.strip())
+    if raw:
+        return re.split(r'\s*,\s*', raw.strip())
+    return None
 
 def asDate(raw):
-    return raw and parsedate_to_datetime(raw)
+    if raw:
+        try:
+            return parsedate_to_datetime(raw)
+        except Exception:
+            return None
+    return None
 
 def asURLs(raw):
-    return raw and re.split(r'>?\s*,?\s*<?', raw.strip())
+    if raw:
+        return messageid_re.findall(raw)
+    return None
 
 def asOneURL(raw):
     return raw and raw.strip("<>")
@@ -39,17 +54,17 @@ def asText(raw):
     return raw and str(make_header(decode_header(raw))).strip()
 
 
-def bodystructure(id, eml, partno=None):
-    hdrs = [{'name': k, 'value': v} for k, v in eml.items()]
-    typ = eml.get_content_type().lower()
+def bodystructure(blobId, part, partno=None):
+    hdrs = [{'name': k, 'value': v} for k, v in part.items()]
+    typ = part.get_content_type().lower()
     bodyValues = {}
 
-    if eml.is_multipart():
-        subParts = []
-        for n, part in enumerate(eml.iter_parts()):
-            subBodyValues, part = bodystructure(id, part, f"{partno}.{n}" if partno else str(n))
+    if typ.startswith('multipart/'):
+        subparts = []
+        for n, subpart in enumerate(part.iter_parts(), 1):
+            subBodyValues, subpart = bodystructure(id, subpart, f"{partno}-{n}" if partno else f"{n}")
             bodyValues.update(subBodyValues)
-            subParts.append(part)
+            subparts.append(subpart)
         return bodyValues, {
             'partId': None,
             'blobId': None,
@@ -59,24 +74,24 @@ def bodystructure(id, eml, partno=None):
             'name': None,
             'cid': None,
             'disposition': 'none',
-            'subParts': subParts,
+            'subParts': subparts,
         }
 
     partno = partno or '1'
-    body = eml.get_content()
+    body = part.get_content()
     if typ in ('text/plain', 'text/html'):
         bodyValues[partno] = {'value': body, 'type': typ}
     return bodyValues, {
         'partId': partno,
-        'blobId': f"{id}-{partno}",
+        'blobId': f"{blobId}-{partno}",
         'type': typ,
         'size': len(body),
         'headers': hdrs,
-        'name': eml.get_filename(),
-        'cid': asOneURL(eml['Content-ID']),
-        'language': asCommaList(eml['Content-Language']),
-        'location': asText(eml['Content-Location']),
-        'disposition': eml.get_content_disposition() or 'none',
+        'name': part.get_filename(),
+        'cid': asOneURL(part['Content-ID']),
+        'language': asCommaList(part['Content-Language']),
+        'location': asText(part['Content-Location']),
+        'disposition': part.get_content_disposition() or 'none',
     }
 
 
@@ -125,7 +140,7 @@ def parseStructure(parts, multipartType, inAlternative):
         if textBody and not htmlBody:
             htmlBody.extend(textBody)
     
-    return textBody, htmlBody,attachments
+    return textBody, htmlBody, attachments
 
 
 def htmltotext(html):

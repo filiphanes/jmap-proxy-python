@@ -647,6 +647,21 @@ class ImapAccount:
             'notFound': notFound,
         }
 
+    async def upload(self, content, typ=''):
+        """Store as email with 1 part containing content"""
+        from email.message import EmailMessage
+        msg = EmailMessage()
+        msg.set_content(content)
+        body = msg.as_bytes()
+        ok, lines = self.imap.append(body, 'Drafts')
+        # TODO: fetch created email['id']
+        return {
+            'accountId': self.id,
+            'blobId': f"G{email['id']}-0",
+            'size': len(content),
+            'type': typ,
+        }
+
     async def download(self, blobId):
         search = self.as_imap_search({'blobId': blobId})
         ok, lines = self.imap.uid_search(search, ret='ALL')

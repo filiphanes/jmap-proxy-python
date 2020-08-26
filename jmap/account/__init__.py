@@ -1,32 +1,31 @@
 from .personal import PersonalAccount
 from .imap import ImapAccount
 from .smtp import SmtpAccountMixin
-from .storage import FileBlobMixin
+from .storage import ProxyBlobMixin
 
 
-class UserAccount(ImapAccount, FileBlobMixin, SmtpAccountMixin, PersonalAccount):
+class UserAccount(ImapAccount, ProxyBlobMixin, SmtpAccountMixin, PersonalAccount):
     def __init__(self,
                  username, password,
                  imap_host='localhost', imap_port=143,
-                 storage_path=None,
+                 storage_path='http://localhost:8888/',
                  smtp_host='localhost', smtp_port=143,
                  loop=None,
                  ):
         ImapAccount.__init__(self, username, password, imap_host, imap_port, loop)
-        FileBlobMixin.__init__(self, storage_path)
-        # S3BlobMixin.__init__(self, storage_path)
+        # FileBlobMixin.__init__(self, storage_path)
+        ProxyBlobMixin.__init__(self, storage_path)
         SmtpAccountMixin.__init__(self, username, password, smtp_host, smtp_port, email=username)
 
     async def ainit(self):
         await ImapAccount.ainit(self)
 
     async def upload(self, stream, type):
-        out = await FileBlobMixin.upload(self, stream, type)
-        out['blobId'] = 'file:' + out['blobId']
-        return out
+        # Overrides ImapAccount.upload
+        return await ProxyBlobMixin.upload(self, stream, type)
 
     async def download(self, blobId: str):
-        if blobId.startswith('file:'):
-            return await FileBlobMixin.download(self, blobId[5:])
-        else:
+        try:
+            return await ProxyBlobMixin.download(self, blobId)
+        except Exception:
             return await ImapAccount.download(self, blobId)

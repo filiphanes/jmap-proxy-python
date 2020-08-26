@@ -5,8 +5,6 @@ from aiohttp.client import ClientSession
 
 from jmap import errors
 
-from starlette.datastructures import MutableHeaders
-
 class FileBlobMixin:
     chunk_size = 4096
 
@@ -40,33 +38,25 @@ class FileBlobMixin:
         except FileNotFoundError:
             raise errors.notFound()
 
-class S3BlobMixin:
+class ProxyBlobMixin:
     http = ClientSession()
 
     def __init__(self, base, http_session=None):
-        """base: 'https://s3host.com/bucket/{blobId}'
-        """
         self.base = base
         if http_session:
             self.http = http_session or ClientSession()
 
-    async def upload(self, stream, type):
-        blobId = random.randbytes(16).hex()
-        size = 0
-        async with self.http.post(self.base.format(blobId=blobId)) as r:
-            async for chunk in stream:
-                await r.write(chunk)
-                size += len(chunk)
-
-        return {
-            'accountId': self.id,
-            'blobId': blobId,
-            'type': type,
-            'size': size,
-        }
+    async def upload(self, stream, content_type):
+        headers = {}
+        if content_type:
+            headers['content-type'] = content_type
+        async with self.http.post(self.base + self.id, data=stream, headers=headers) as r:
+            return await r.json()
 
     async def download(self, blobId):
-        async with self.http.get(self.base.format(blobId=blobId)) as res:
-            if res.status == 404:
-                raise errors.notFound(f'Blob {blobId} not found')
-            return await res.body()
+        async with self.http.get(f"{self.base}{self.id}/{blobId}") as res:
+            if res.status == 200:
+                return await res.body()
+            elif res.status // 100 == 5:
+                raise errors.serverFail()
+        raise errors.notFound(f'Blob {blobId} not found')

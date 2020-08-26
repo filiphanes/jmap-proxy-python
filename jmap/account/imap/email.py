@@ -61,12 +61,12 @@ class ImapEmail(dict):
                 return self['DECODEDHEADERS']
 
     def blobId(self):
-        return self['X-GUID']
-        # TODO: return self['EMAILID'][0]
+        return f"G{self['X-GUID']}"
+        # TODO: OBJECTID extension: return self['EMAILID'][0]
 
     def threadId(self):
         return self['X-GUID']
-        # TODO: self['THREADID'][0]
+        # TODO: OBJECTID extension: self['THREADID'][0]
 
     def hasAttachment(self):
         # Dovecot with mail_attachment_detection_options = add-flags-on-save
