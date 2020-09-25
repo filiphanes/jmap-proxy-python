@@ -171,9 +171,11 @@ class ImapEmail(dict):
 
     # Used when creating message
     def FLAGS(self):
-        return [keyword2flag(kw) for kw in self['keywords']]
+        if 'keywords' in self:
+            return [keyword2flag(kw) for kw in self['keywords']]
+        return ()
 
-    def BODY(self, blobs):
+    def make_body(self, blobs):
         return make(self, blobs)
 
 # Define address getters

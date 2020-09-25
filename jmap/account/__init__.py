@@ -20,7 +20,7 @@ class UserAccount(ImapAccount, ProxyBlobMixin, SmtpAccountMixin, PersonalAccount
     async def ainit(self):
         await ImapAccount.ainit(self)
 
-    async def upload(self, stream, type):
+    async def upload(self, stream, type=None):
         # Overrides ImapAccount.upload
         return await ProxyBlobMixin.upload(self, stream, type)
 

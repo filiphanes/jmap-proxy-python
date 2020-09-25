@@ -1,3 +1,5 @@
+import binascii
+
 import pytest
 from random import random
 
@@ -287,6 +289,53 @@ async def test_email_setget_seen(account, idmap, email_id):
         )
         assert response['list'][0]['id'] == email_id
         assert response['list'][0]['keywords'].get('$seen', False) == state
+
+
+@pytest.mark.asyncio
+async def test_email_create_destroy(account, idmap, inbox_id):
+    async def create_stream():
+        yield binascii.a2b_base64("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVQYV2NgYAAAAAMAAWgmWQ0AAAAASUVORK5CYII=")
+    res = await account.upload(create_stream())
+    attachmentBlobId = res['blobId']
+    email = {
+        "mailboxIds": [inbox_id],
+        "to": [{
+            "name": "Filip Hanes",
+            "email": "filip.hanes@example.com"
+        }],
+        "bodyValues": {
+            "1": {
+                "type": "text/plain",
+                "value": "Hi,\nwhats'up wonderful person?",
+            },
+            "2": {
+                "type": "text/html",
+                "value": "<p>Hi,</p><p>whats'up wonderful person?</p>",
+            },
+        },
+        "textBody": [{
+            'partId': "1",
+            'type': "text/plain",
+        }],
+        "htmlBody": [{
+            'partId': "2",
+            'type': "text/html",
+        }],
+        "attachments": [
+            {
+                'blobId': attachmentBlobId,
+                'type': "image/png",
+                'name': "picture.png",
+                'cid': "picture.png",
+                'disposition': 'attachment',
+            },
+        ]
+    }
+    response = await account.email_set(idmap, create={"test": email})
+    assert response['created']['test']['id']
+    blobId = response['created']['test']['blobId']
+    assert blobId
+    body = await account.download(blobId)
 
 
 @pytest.mark.asyncio

@@ -46,11 +46,8 @@ class ProxyBlobMixin:
         if http_session:
             self.http = http_session or ClientSession()
 
-    async def upload(self, stream, content_type):
-        headers = {}
-        if content_type:
-            headers['content-type'] = content_type
-        async with self.http.post(self.base + self.id, data=stream, headers=headers) as r:
+    async def upload(self, stream, content_type=None):
+        async with self.http.post(f"{self.base}{self.id}", data=stream) as r:
             return await r.json()
 
     async def download(self, blobId):

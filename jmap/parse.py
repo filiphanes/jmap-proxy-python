@@ -1,7 +1,10 @@
+from datetime import datetime
 from email.header import decode_header, make_header
 from email.message import EmailMessage
 from email.utils import format_datetime, parsedate_to_datetime
 from io import BytesIO
+from random import randrange
+
 import lxml
 from email._parseaddr import AddressList
 import re
@@ -45,7 +48,7 @@ def asURLs(raw):
     return None
 
 def asOneURL(raw):
-    return raw and raw.strip("<>")
+    return raw and raw.strip(" <>")
 
 def asRaw(raw):
     return raw
@@ -73,7 +76,7 @@ def bodystructure(blobId, part, partno=None):
             'headers': hdrs,
             'name': None,
             'cid': None,
-            'disposition': 'none',
+            'disposition': None,
             'subParts': subparts,
         }
 
@@ -192,7 +195,7 @@ def make_attachment(att, blobs):
         'inline' if att['isInline'] else 'attachment',
         filename=att['name'],
         )
-    if att['cid']:
+    if att.get('cid', False):
         msg.add_header('Content-ID', "<" + att['cid'] + ">")
     typ, content = blobs[att['blobId']]
     msg.add_header('Content-Transfer-Encoding', detect_encoding(content, att['type']))
@@ -202,32 +205,37 @@ def make_attachment(att, blobs):
 
 def make(data, blobs):
     msg = EmailMessage()
-    msg['From'] = ', '.join(format_email_header(a) for a in data['from'])
-    msg['To'] = ', '.join(format_email_header(a) for a in data['to'])
-    msg['Cc'] = ', '.join(format_email_header(a) for a in data['cc'])
-    msg['Bcc'] = ', '.join(format_email_header(a) for a in data['bcc'])
-    msg['Subject'] = data['subject']
-    msg['Date'] = format_datetime(data['msgdate'])
-    for header, val in data['headers'].items():
-        msg[header] = val
-    if 'replyTo' in data:
-        msg['replyTo'] = data['replyTo']
-
-    if 'textBody' in data:
-        text = data['textBody']
-    else:
-        text = htmltotext(data['htmlBody'])
     msg.add_header('Content-Type', 'text/plain')
-    msg.set_content(text)
+    rand_id = f"{randrange(2**64)}"
+    if 'textBody' in data:
+        partId = data['textBody'][0]['partId']
+        msg.set_content(data['bodyValues'][partId]['value'])
 
     if 'htmlBody' in data:
-        htmlpart = EmailMessage()
-        htmlpart.add_header('Content-Type', 'text/html')
-        htmlpart.set_content(data['htmlBody'])
-        msg.make_alternative()
-        msg.add_alternative(htmlpart)
+        partId = data['htmlBody'][0]['partId']
+        html = data['bodyValues'][partId]['value']
+        if 'textBody' not in data:
+            msg.set_content(htmltotext(html))
+        msg.make_alternative(boundary=rand_id)
+        msg.add_alternative(html, subtype='html')
 
     for att in data.get('attachments', ()):
         msg.add_attachment(make_attachment(att, blobs))
+
+    msg.add_header('Date', format_datetime(data.get('msgdate', datetime.now())))
+    if 'subject' in data:
+        msg.add_header('Subject', data['subject'])
+    if 'messageId' in data:
+        msg.add_header('Message-ID', f"<{data.get['messageId']}>")
+    else:
+        msg.add_header('Message-ID', f"<{rand_id}@example.com>")
+    for addr in ('from', 'to', 'cc', 'bcc'):
+        if addr in data:
+            msg.add_header(addr.capitalize(), ', '.join(format_email_header(a) for a in data[addr]))
+    if 'replyTo' in data:
+        msg.add_header('Reply-To', ', '.join(format_email_header(a) for a in data[addr]))
+    for header, val in data.items():
+        if header.startswith('header:'):
+            msg[header[7:]] = val
 
     return msg.as_bytes()

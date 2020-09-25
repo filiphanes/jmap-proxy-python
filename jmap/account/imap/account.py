@@ -457,21 +457,35 @@ class ImapAccount:
         if not mailbox or mailbox['deleted']:
             raise errors.notFound(f"Mailbox {mailboxid} not found")
         msg = ImapEmail(data)
-        body = msg['BODY']
+        blobs = {}
+        for attachment in data.get('attachments', ()):
+            blobId = attachment.get('blobId', None)
+            if blobId is not None:
+                blobs[blobId] = await self.download(blobId)
+        body = msg.make_body(blobs)
         flags = "(%s)" % (''.join(msg['FLAGS']))
-        ok, lines = await self.imap.append(body, mailbox['imapname'], flags)
-        match = re.search(r'\[APPENDUID (\d+) (\d+)\]', lines[0])
-        # TODO: FETCH UID and X-GUID
-        return {
-            'id': self.format_email_id(int(match.group(2))),
-            'blobId': msg['blobId'],
-        }
+        imapname = mailbox['imapname']
+        ok, lines = await self.imap.append(body, imapname, flags)
+        match = re.search(r'\[APPENDUID (\d+) (\d+)\]', lines[-1])
+        ok, lines = await self.imap.noop()
+        ok, lines = await self.imap.search(f"X-REAL-UID {match[2]} X-MAILBOX {imapname}", ret='ALL')
+        search = parse_esearch(lines)
+        ok, lines = await self.imap.uid_fetch(search['ALL'], "(UID X-GUID)")
+        for seq, fetch in parse_fetch(lines[:-1]):
+            id = self.format_email_id(int(fetch['UID']))
+            msg['id'] = id
+            msg['X-GUID'] = fetch['X-GUID']
+            self.emails[id] = msg
+            return {
+                'id': id,
+                'blobId': msg['blobId'],
+            }
 
     async def create_emails(self, idmap, create):
         created, notCreated = {}, {}
         for cid, data in create.items():
             try:
-                created[cid] = self.create_email(data)
+                created[cid] = await self.create_email(data)
                 idmap.set(cid, created[cid]['id'])
             except errors.JmapError as e:
                 notCreated[cid] = e.to_dict()
