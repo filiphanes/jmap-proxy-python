@@ -295,7 +295,7 @@ async def test_email_setget_seen(account, idmap, email_id):
 async def test_email_create_destroy(account, idmap, inbox_id):
     async def create_stream():
         yield binascii.a2b_base64("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVQYV2NgYAAAAAMAAWgmWQ0AAAAASUVORK5CYII=")
-    res = await account.upload(create_stream())
+    res = await account.upload(create_stream(), 'image/png')
     attachmentBlobId = res['blobId']
     email = {
         "mailboxIds": [inbox_id],
@@ -336,6 +336,7 @@ async def test_email_create_destroy(account, idmap, inbox_id):
     blobId = response['created']['test']['blobId']
     assert blobId
     body = await account.download(blobId)
+    assert body
 
 
 @pytest.mark.asyncio

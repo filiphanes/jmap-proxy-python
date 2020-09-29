@@ -467,8 +467,9 @@ class ImapAccount:
         imapname = mailbox['imapname']
         ok, lines = await self.imap.append(body, imapname, flags)
         match = re.search(r'\[APPENDUID (\d+) (\d+)\]', lines[-1])
+        # ensure refreshed folder view
         ok, lines = await self.imap.noop()
-        ok, lines = await self.imap.search(f"X-REAL-UID {match[2]} X-MAILBOX {imapname}", ret='ALL')
+        ok, lines = await self.imap.uid_search(f"X-REAL-UID {match[2]} X-MAILBOX {imapname}", ret='ALL')
         search = parse_esearch(lines)
         ok, lines = await self.imap.uid_fetch(search['ALL'], "(UID X-GUID)")
         for seq, fetch in parse_fetch(lines[:-1]):
@@ -677,11 +678,11 @@ class ImapAccount:
         }
 
     async def download(self, blobId):
-        search = self.as_imap_search({'blobId': blobId})
-        ok, lines = self.imap.uid_search(search, ret='ALL')
-        uidset = parse_esearch(lines)
-        for uid in uidset:
-            ok, lines = self.imap.uid_fetch(str(uid), '(BODY.PEEK[])')
+        search = self.as_imap_search({'blobId': blobId[1:]})
+        ok, lines = await self.imap.uid_search(search.decode(), ret='ALL')
+        uidset = parse_esearch(lines).get('ALL', '')
+        for uid in iter_messageset(uidset):
+            ok, lines = await self.imap.uid_fetch(str(uid), '(BODY.PEEK[])')
             for seq, data in parse_fetch(lines[:-1]):
                 return data['BODY[]']
         raise errors.notFound(f"Blob {blobId} not found")
@@ -929,7 +930,9 @@ class ImapAccount:
             search, func = SEARCH_MAP.get(crit, (None, None))
             if search:
                 out += search
+                out += b' '
                 out += func(value) if func else value
+                out += b' '
             elif 'deleted' == crit:
                 if not value:
                     out += b'NOT '
@@ -1103,7 +1106,7 @@ def quoted_bytes(s):
 
 
 SEARCH_MAP = {
-    'blobId': (b'X-GUID', bytes),
+    'blobId': (b'X-GUID', str.encode),
     'minSize': (b'NOT SMALLER', int2bytes),
     'maxSize': (b'NOT LARGER', int2bytes),
     'hasKeyword': (b'KEYWORD', keyword2flag),
@@ -1111,8 +1114,8 @@ SEARCH_MAP = {
     'allInThreadHaveKeyword': (b'NOT INTHREAD UNKEYWORD', keyword2flag),
     'someInThreadHaveKeyword': (b'INTHREAD KEYWORD', keyword2flag),
     'noneInThreadHaveKeyword': (b'NOT INTHREAD KEYWORD', keyword2flag),
-    'before': (b'BEFORE', bytes),  # TODO: consider time, not only date
-    'after': (b'AFTER', bytes),
+    'before': (b'BEFORE', str.encode),  # TODO: consider time, not only date
+    'after': (b'AFTER', str.encode),
     'subject': (b'SUBJECT', quoted_bytes),
     'text': (b'TEXT', quoted_bytes),
     'body': (b'BODY', quoted_bytes),

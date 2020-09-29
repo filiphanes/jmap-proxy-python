@@ -47,13 +47,16 @@ class ProxyBlobMixin:
             self.http = http_session or ClientSession()
 
     async def upload(self, stream, content_type=None):
-        async with self.http.post(f"{self.base}{self.id}", data=stream) as r:
+        headers = {}
+        if content_type is not None:
+            headers['content-type'] = content_type
+        async with self.http.post(f"{self.base}{self.id}", data=stream, headers=headers) as r:
             return await r.json()
 
     async def download(self, blobId):
         async with self.http.get(f"{self.base}{self.id}/{blobId}") as res:
             if res.status == 200:
-                return await res.body()
+                return await res.read()
             elif res.status // 100 == 5:
                 raise errors.serverFail()
         raise errors.notFound(f'Blob {blobId} not found')

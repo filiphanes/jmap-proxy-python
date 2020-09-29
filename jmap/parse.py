@@ -3,6 +3,7 @@ from email.header import decode_header, make_header
 from email.message import EmailMessage
 from email.utils import format_datetime, parsedate_to_datetime
 from io import BytesIO
+from operator import itemgetter
 from random import randrange
 
 import lxml
@@ -188,21 +189,6 @@ def detect_encoding(content, typ):
     return 'base64'
 
 
-def make_attachment(att, blobs):
-    msg = EmailMessage()
-    msg.add_header('Content-Type', att['type'], name=att['name'])
-    msg.add_header('Content-Disposition',
-        'inline' if att['isInline'] else 'attachment',
-        filename=att['name'],
-        )
-    if att.get('cid', False):
-        msg.add_header('Content-ID', "<" + att['cid'] + ">")
-    typ, content = blobs[att['blobId']]
-    msg.add_header('Content-Transfer-Encoding', detect_encoding(content, att['type']))
-    msg.set_payload(content)
-    return msg
-
-
 def make(data, blobs):
     msg = EmailMessage()
     msg.add_header('Content-Type', 'text/plain')
@@ -219,8 +205,21 @@ def make(data, blobs):
         msg.make_alternative(boundary=rand_id)
         msg.add_alternative(html, subtype='html')
 
-    for att in data.get('attachments', ()):
-        msg.add_attachment(make_attachment(att, blobs))
+    attachments = data.get('attachments', [])
+    attachments.sort(key=itemgetter('disposition'), reverse=True)
+    for att in attachments:
+        maintype, _, subtype = att['type'].partition('/')
+        kwargs = {
+            'obj': blobs[att['blobId']],
+            'maintype': maintype,
+            'subtype': subtype,
+            'filename': att['name'],
+            'cid': att.get('cid', None),
+        }
+        if att['disposition'] == 'inline':
+            msg.add_related(**kwargs)
+        else:
+            msg.add_attachment(**kwargs)
 
     msg.add_header('Date', format_datetime(data.get('msgdate', datetime.now())))
     if 'subject' in data:
