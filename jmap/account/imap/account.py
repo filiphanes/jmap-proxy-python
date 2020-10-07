@@ -465,6 +465,15 @@ class ImapAccount:
         body = msg.make_body(blobs)
         flags = "(%s)" % (''.join(msg['FLAGS']))
         imapname = mailbox['imapname']
+        uid, msg['X-GUID'] = await self._imap_append(body, imapname, flags)
+        msg['id'] = self.format_email_id(uid)
+        self.emails[id] = msg
+        return {
+            'id': msg['id'],
+            'blobId': msg['blobId'],
+        }
+
+    async def _imap_append(self, body, imapname='INBOX', flags=None, data=None):
         ok, lines = await self.imap.append(body, imapname, flags)
         match = re.search(r'\[APPENDUID (\d+) (\d+)\]', lines[-1])
         # ensure refreshed folder view
@@ -473,14 +482,8 @@ class ImapAccount:
         search = parse_esearch(lines)
         ok, lines = await self.imap.uid_fetch(search['ALL'], "(UID X-GUID)")
         for seq, fetch in parse_fetch(lines[:-1]):
-            id = self.format_email_id(int(fetch['UID']))
-            msg['id'] = id
-            msg['X-GUID'] = fetch['X-GUID']
-            self.emails[id] = msg
-            return {
-                'id': id,
-                'blobId': msg['blobId'],
-            }
+            return int(fetch['UID']), fetch['X-GUID']
+        raise errors.serverFail("Couldn't fetch UID X-GUID")
 
     async def create_emails(self, idmap, create):
         created, notCreated = {}, {}
@@ -492,15 +495,15 @@ class ImapAccount:
                 notCreated[cid] = e.to_dict()
         return created, notCreated
 
-    async def update_email(self, msg, update):
-        values = update.pop('keywords', {})
+    async def update_email(self, msg, patch):
+        values = patch.pop('keywords', {})
         store = {True: [keyword2flag(k) for k, v in values.items() if v],
                 False: [keyword2flag(k) for k, v in values.items() if not v]}
-        values = update.pop('mailboxIds', {})
+        values = patch.pop('mailboxIds', {})
         mids = {True: [k for k, v in values.items() if v],
                False: [k for k, v in values.items() if not v]}
 
-        for path, value in update.items():
+        for path, value in patch.items():
             prop, _, key = path.partition('/')
             if prop == 'keywords':
                 store[bool(value)].append(keyword2flag(key))
@@ -520,7 +523,9 @@ class ImapAccount:
                     msg['FLAGS'] = data['FLAGS']
                     msg.pop('keywords', None)
 
-        if mids[True] or mids[False]:
+        # if msg is already there, ignore invalid False folders
+        if (mids[True] or mids[False]) and \
+            msg['mailboxIds'] != mids[True]:
             if len(mids[True]) > 1 or \
                len(mids[False]) > 1 or \
                msg['mailboxIds'] != mids[False]:
@@ -529,7 +534,7 @@ class ImapAccount:
                 mailbox_to = self.mailboxes[mids[True][0]]
             except KeyError:
                 raise errors.notFound('Mailbox not found')
-            ok, lines = self.imap.uid_move(uid, quoted(mailbox_to['imapname']))
+            ok, lines = await self.imap.uid_move(uid, quoted(mailbox_to['imapname']))
             if ok != 'OK':
                 raise errors.serverFail('\n'.join(lines))
 
@@ -570,7 +575,7 @@ class ImapAccount:
 
         created, notCreated = await self.create_emails(idmap, create or {})
 
-        update = {idmap.get(id): path for id, path in (update or {})}
+        update = {idmap.get(id): path for id, path in (update or {}).items()}
         updated, notUpdated = await self.update_emails(update)
 
         destroy = [idmap.get(id) for id in (destroy or ())]
@@ -709,17 +714,10 @@ class ImapAccount:
                     imapname = self.mailboxes[mailboxIds[0]]['imapname']
                 except KeyError:
                     raise errors.notFound(f"mailboxId {mailboxIds[0]} not found")
-                flags = "(%s)" % \
-                        (' '.join(keyword2flag(kw) for kw in email['keywords']))
-                if 'receivedAt' in email:
-                    date = email['receivedAt']
-                else:
-                    # TODO: most recent Received header
-                    date = datetime.now()
-                ok, lines = self.imap.append(body, imapname, flags, date)
-                match = re.search(r'\[APPENDUID (\d+) (\d+)\]', lines[0])
-                # TODO: use uid from \All mailbox
-                created[id] = self.format_email_id(int(match.group(2)))
+                flags = "(%s)" % (' '.join(keyword2flag(kw) for kw in email['keywords']))
+                date = email.get('receivedAt', datetime.now())
+                uid, guid = await self._imap_append(body, imapname, flags, date)
+                created[id] = self.format_email_id(uid)
             except errors.JmapError as e:
                 notCreated[id] = e.to_dict()
             except Exception as e:

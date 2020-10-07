@@ -7,7 +7,7 @@ class SmtpAccountMixin:
     """
     Implements email submission and identities
     """
-    def __init__(self, username, password=None, smtp_host='localhost', smtp_port='25', email=None):
+    def __init__(self, username, password=None, smtp_host='localhost', smtp_port=25, email=None):
         self.smtp_user = username
         self.smtp_pass = password
         self.smtp_host = smtp_host
@@ -72,7 +72,8 @@ class SmtpAccountMixin:
         created = {}
         notCreated = {}
         if create:
-            await self.fill_emails(['blobId'], [e['emailId'] for e in create.items()])
+            emailIds = [e['emailId'] for e in create.values()]
+            await self.fill_emails(['blobId'], emailIds)
         else:
             create = {}
         for cid, submission in create.items():
@@ -84,8 +85,8 @@ class SmtpAccountMixin:
                 raise errors.notFound(f"EmailId {submission['emailId']} not found")
             envelope = submission.get('envelope', None)
             if envelope:
-                sender = envelope['mailFrom']
-                recipients = [to['submission'] for to in envelope['rcptTo']]
+                sender = envelope['mailFrom']['email']
+                recipients = [to['email'] for to in envelope['rcptTo']]
             else:
                 # TODO: If multiple addresses are present in one of these header fields,
                 #       or there is more than one Sender/From header field, the server
@@ -104,10 +105,15 @@ class SmtpAccountMixin:
                 recipients=recipients,
                 hostname=self.smtp_host,
                 port=self.smtp_port,
-                username=self.smtp_user,
-                password=self.smtp_pass,
+                # username=self.smtp_user,
+                # password=self.smtp_pass,
             )
+            id = 'fOobAr'
+            idmap.set(cid, id)
             created[cid] = {'id': id}
+
+        destroyed = []
+        notDestroyed = []
 
         result = {
             "accountId": self.id,
@@ -115,18 +121,27 @@ class SmtpAccountMixin:
             "newState": await self.emailsubmission_state(),
             "created": created,
             "notCreated": notCreated,
+            "destroyed": destroyed,
+            "notDestroyed": notDestroyed,
         }
 
-        if onSuccessUpdateEmail or onSuccessDestroyEmail:
+        updateEmail = {}
+        for id in created.keys():
+            patch = onSuccessUpdateEmail.get(f"#{id}", None)
+            if patch:
+                updateEmail[create[id]['emailId']] = patch
+        destroyEmail = [id for id in destroyed if f"#{id}" in onSuccessDestroyEmail]
+
+        if updateEmail or destroyEmail:
             update_result = await self.email_set(
                 idmap,
-                update=onSuccessUpdateEmail,
-                destroy=onSuccessDestroyEmail,
+                update=updateEmail,
+                destroy=destroyEmail,
             )
-        else:
-            update_result = None
+            update_result['method_name'] = 'Email/set'
+            return result, update_result
 
-        return result, update_result
+        return result
 
     async def emailsubmission_state(self):
         return "1"

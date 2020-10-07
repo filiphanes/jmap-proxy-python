@@ -16,27 +16,27 @@ def register_methods(methods):
     })
 
 
-def api_EmailSubmission_get(request, accountId, ids=None):
-    return request['user'].get_account(accountId).emailsubmission_get(ids)
+def api_EmailSubmission_get(request, accountId, **kwargs):
+    return request['user'].get_account(accountId).emailsubmission_get(request['idmap'], **kwargs)
 
-def api_EmailSubmission_set(request, accountId, ids=None):
-    return request['user'].get_account(accountId).emailsubmission_set(ids)
+def api_EmailSubmission_set(request, accountId, **kwargs):
+    return request['user'].get_account(accountId).emailsubmission_set(request['idmap'], **kwargs)
 
-def api_EmailSubmission_query(request, accountId, ids=None):
-    return request['user'].get_account(accountId).emailsubmission_query(ids)
+def api_EmailSubmission_query(request, accountId, **kwargs):
+    return request['user'].get_account(accountId).emailsubmission_query(**kwargs)
 
-def api_EmailSubmission_changes(request, accountId, ids=None):
-    return request['user'].get_account(accountId).emailsubmission_changes(ids)
+def api_EmailSubmission_changes(request, accountId, **kwargs):
+    return request['user'].get_account(accountId).emailsubmission_changes(**kwargs)
 
-def api_EmailSubmission_queryChanges(request, accountId, ids=None):
-    return request['user'].get_account(accountId).emailsubmission_changes(ids)
+def api_EmailSubmission_queryChanges(request, accountId, **kwargs):
+    return request['user'].get_account(accountId).emailsubmission_changes(**kwargs)
 
 
-def api_Identity_get(request, accountId, ids=None):
-    return request['user'].get_account(accountId).identity_get(ids)
+def api_Identity_get(request, accountId, **kwargs):
+    return request['user'].get_account(accountId).identity_get(**kwargs)
 
-def api_Identity_set(request, accountId, ids=None):
-    return request['user'].get_account(accountId).identity_set(ids)
+def api_Identity_set(request, accountId, **kwargs):
+    return request['user'].get_account(accountId).identity_set(**kwargs)
 
-def api_Identity_changes(request, accountId, ids=None):
-    return request['user'].get_account(accountId).identity_changes(ids)
+def api_Identity_changes(request, accountId, **kwargs):
+    return request['user'].get_account(accountId).identity_changes(**kwargs)

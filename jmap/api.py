@@ -79,7 +79,12 @@ async def api(request):
             result = method(request, **kwargs)
             if isawaitable(result):
                 result = await result
-            results.append((method_name, result, tag))
+            if type(result) is tuple:
+                # Emailsubmission/set may return 2 responses
+                for res in result:
+                    results.append((res.pop('method_name', method_name), res, tag))
+            else:
+                results.append((method_name, result, tag))
             results_bytag[tag] = result
         except errors.JmapError as e:
             results.append(e.to_dict())

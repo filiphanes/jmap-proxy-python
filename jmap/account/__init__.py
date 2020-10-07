@@ -9,7 +9,7 @@ class UserAccount(ImapAccount, ProxyBlobMixin, SmtpAccountMixin, PersonalAccount
                  username, password,
                  imap_host='localhost', imap_port=143,
                  storage_path='http://localhost:8888/',
-                 smtp_host='localhost', smtp_port=143,
+                 smtp_host='localhost', smtp_port=25,
                  loop=None,
                  ):
         ImapAccount.__init__(self, username, password, imap_host, imap_port, loop)
