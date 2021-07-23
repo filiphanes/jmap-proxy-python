@@ -4,7 +4,7 @@ import datetime
 
 from jmap.parse import asAddresses, asMessageIds, asGroupedAddresses, asDate, asURLs, asRaw, asCommaList, bodystructure
 
-WIP
+
 def test_asAddresses():
     assert asAddresses(None) is None
     assert asAddresses('') is None

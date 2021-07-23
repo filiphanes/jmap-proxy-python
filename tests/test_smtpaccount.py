@@ -21,6 +21,38 @@ async def test_identity_get(account, idmap):
 
 @pytest.mark.asyncio
 async def test_emailsubmission_set(account, idmap, email_id, inbox_id):
+    response1 = await account.emailsubmission_set(
+        idmap,
+        create={
+            "test": {
+                "identityId": account.id,
+                "emailId": email_id,
+                "envelope": {
+                    "mailFrom": {
+                        "email": account.id,
+                        "parameters": None
+                    },
+                    "rcptTo": [{
+                        "email": account.id,
+                        "parameters": None
+                    }]
+                }
+            }
+        }
+    )
+    assert response1['accountId'] == account.id
+    assert isinstance(response1['notCreated'], dict)
+    assert not response1['notCreated']
+    assert isinstance(response1['created'], dict)
+    assert response1['created']['test']['id']
+    assert isinstance(response1['oldState'], str)
+    assert response1['oldState']
+    assert isinstance(response1['newState'], str)
+    assert response1['newState']
+
+
+@pytest.mark.asyncio
+async def test_emailsubmission_set_with_update(account, idmap, email_id, inbox_id, drafts_id):
     response1, response2 = await account.emailsubmission_set(
         idmap,
         create={
@@ -41,7 +73,7 @@ async def test_emailsubmission_set(account, idmap, email_id, inbox_id):
         },
         onSuccessUpdateEmail={
             "#test": {
-                "mailboxIds/Drafts-GUID": True,
+                "mailboxIds/"+drafts_id: None,
                 "mailboxIds/"+inbox_id: True,
                 "keywords/$draft": None
             }

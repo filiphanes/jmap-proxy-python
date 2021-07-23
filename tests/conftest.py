@@ -48,6 +48,11 @@ def inbox_id():
 
 
 @pytest.fixture()
+def drafts_id():
+    return "b0e0b8292940de5ecddd000039771c66"
+
+
+@pytest.fixture()
 def uidvalidity():
     return 1596626536
 

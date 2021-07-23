@@ -6,6 +6,9 @@ from aiohttp.client import ClientSession
 from jmap import errors
 
 class FileBlobMixin:
+    """Provides methods upload and download.
+    Stores files in local filesystem directory"""
+
     chunk_size = 4096
 
     def __init__(self, dir=None):
@@ -38,7 +41,11 @@ class FileBlobMixin:
         except FileNotFoundError:
             raise errors.notFound()
 
+
 class ProxyBlobMixin:
+    """Provides methods upload and download.
+    Proxies request to other HTTP service"""
+
     http = ClientSession()
 
     def __init__(self, base, http_session=None):

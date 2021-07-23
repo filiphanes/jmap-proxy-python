@@ -112,6 +112,7 @@ class SmtpAccountMixin:
             idmap.set(cid, id)
             created[cid] = {'id': id}
 
+        updated = []
         destroyed = []
         notDestroyed = []
 
@@ -125,22 +126,25 @@ class SmtpAccountMixin:
             "notDestroyed": notDestroyed,
         }
 
-        updateEmail = {}
-        for id in created.keys():
-            patch = onSuccessUpdateEmail.get(f"#{id}", None)
-            if patch:
-                updateEmail[create[id]['emailId']] = patch
-        destroyEmail = [id for id in destroyed if f"#{id}" in onSuccessDestroyEmail]
+        if onSuccessUpdateEmail or onSuccessDestroyEmail:
+            successfull = set(created.keys())
+            successfull.update(updated, destroyed)
 
-        if updateEmail or destroyEmail:
-            update_result = await self.email_set(
-                idmap,
-                update=updateEmail,
-                destroy=destroyEmail,
-            )
-            update_result['method_name'] = 'Email/set'
-            return result, update_result
+            updateEmail = {}
+            for id in successfull:
+                patch = onSuccessUpdateEmail.get(f"#{id}", None)
+                if patch:
+                    updateEmail[create[id]['emailId']] = patch
+            destroyEmail = [id for id in successfull if f"#{id}" in onSuccessDestroyEmail]
 
+            if updateEmail or destroyEmail:
+                update_result = await self.email_set(
+                    idmap,
+                    update=updateEmail,
+                    destroy=destroyEmail,
+                )
+                update_result['method_name'] = 'Email/set'
+                return result, update_result
         return result
 
     async def emailsubmission_state(self):

@@ -126,3 +126,27 @@ class tooManyKeywords(JmapError):
 
 class tooManyMailboxes(JmapError):
     "The change to the set of Mailboxes that this Email is in would exceed a server-defined maximum."
+
+class invalidEmail(JmapError):
+    "The Email to be sent is invalid in some way. The SetError SHOULD contain a property called properties of type String[] that lists all the properties of the Email that were invalid."
+
+class tooManyRecipients(JmapError):
+    "The envelope (supplied or generated) has more recipients than the server allows. A maxRecipients UnsignedInt property MUST also be present on the SetError specifying the maximum number of allowed recipients."
+
+class noRecipients(JmapError):
+    "The envelope (supplied or generated) does not have any rcptTo email addresses."
+
+class invalidRecipients(JmapError):
+    "The rcptTo property of the envelope (supplied or generated) contains at least one rcptTo value which is not a valid email address for sending to. An invalidRecipients String[] property MUST also be present on the SetError, which is a list of the invalid addresses."
+
+class forbiddenMailFrom(JmapError):
+    "The server does not permit the user to send a message with this envelope From address [@!RFC5321]."
+
+class forbiddenFrom(JmapError):
+    "The server does not permit the user to send a message with the From header field [@!RFC5322] of the message to be sent."
+
+class forbiddenToSend(JmapError):
+    "The user does not have permission to send at all right now for some reason. A description String property MAY be present on the SetError object to display to the user why they are not permitted."
+
+class cannotUnsend(JmapError):
+    "The client attempted to update the undoStatus of a valid EmailSubmission object from pending to canceled, but the message cannot be unsent."
