@@ -15,18 +15,16 @@ class SmtpAccountMixin:
         self.email = email or username
         self.capabilities["urn:ietf:params:jmap:submission"] = {
             "submissionExtensions": [],
-            "maxDelayedSend": 44236800  # 512 days
+            "maxDelayedSend": 10  # immediate
         },
 
+        # static identities, only allows sending from main user email
         self.identities = {
             self.smtp_user: {
                 'id': self.smtp_user,
                 'name': self.name or self.smtp_user,
                 'email': self.email,
-                'replyTo': [{
-                    'name': self.name or self.smtp_user,
-                    'email': self.email
-                }],
+                'replyTo': None,
                 'bcc': None,
                 'textSignature': "",
                 'htmlSignature': "",
@@ -38,7 +36,7 @@ class SmtpAccountMixin:
         lst = []
         notFound = []
         if ids is None:
-            ids = ids or self.identities.keys()
+            ids = self.identities.keys()
 
         for id in ids:
             try:
@@ -53,8 +51,7 @@ class SmtpAccountMixin:
             'notFound': notFound,
         }
 
-    async def indentity_set(self, idmap, ifInState=None, create=None, update=None, destroy=None):
-        # TODO
+    async def identity_set(self, idmap, ifInState=None, create=None, update=None, destroy=None):
         raise NotImplemented()
 
     async def identity_changes(self, sinceState, maxChanges=None):

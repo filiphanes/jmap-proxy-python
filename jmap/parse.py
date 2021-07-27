@@ -5,10 +5,11 @@ from email.utils import format_datetime, parsedate_to_datetime
 from io import BytesIO
 from operator import itemgetter
 from random import randrange
+import re
+import typing
 
 import lxml
 from email._parseaddr import AddressList
-import re
 
 MEDIA_MAIN_TYPES = {'image', 'audio', 'video'}
 
@@ -238,3 +239,31 @@ def make(data, blobs):
             msg[header[7:]] = val
 
     return msg.as_bytes()
+
+
+empty_line_re = re.compile(br'\n\n')
+IMS = re.I | re.M | re.DOTALL
+header_pattern = br'^%s:(.+?)\n(?=[\w\n])'  # re.I | re.M | re.DOTALL
+
+class HeadersBytesParser:
+    """Fast header parser"""
+
+    __slots__ = ['headers']
+
+    def __init__(self, body: memoryview):
+        try:
+            end = empty_line_re.search(body).end()
+        except AttributeError:
+            end = 0
+        self.headers = body[:end]  # includes \n at end
+
+    @classmethod
+    def parse_from_bytes(cls, body: typing.Union[bytes, memoryview, bytearray]):
+        return cls(memoryview(body))
+
+    def get(self, key, default=None):
+        match = re.search(header_pattern % key.encode(), self.headers, IMS)
+        try:
+            return match.group(1)
+        except AttributeError:
+            return default

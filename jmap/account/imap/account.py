@@ -442,7 +442,7 @@ class ImapAccount:
             'accountId': self.id,
             'list': lst,
             'state': await self.email_state(),
-            'notFound': list(notFound),
+            'notFound': notFound,
         }
 
     async def create_email(self, data):
