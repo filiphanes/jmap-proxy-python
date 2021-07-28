@@ -15,7 +15,7 @@ class SmtpAccountMixin:
         self.email = email or username
         self.capabilities["urn:ietf:params:jmap:submission"] = {
             "submissionExtensions": [],
-            "maxDelayedSend": 10  # immediate
+            "maxDelayedSend": 0
         },
 
         # static identities, only allows sending from main user email

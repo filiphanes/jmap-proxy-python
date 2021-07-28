@@ -12,6 +12,7 @@ from jmap.api import api, CAPABILITIES, JSONResponse
 from user import BasicAuthBackend
 
 BASEURL = os.getenv('BASEURL', 'http://127.0.0.1:8888')
+MYSQL_CONNECT = os.getenv('MYSQL_CONNECT', 'mysql://root:pass@127.0.0.1:3306/db')
 
 
 async def event_stream(request, types, closeafter, ping):
@@ -113,14 +114,22 @@ routes = [
     Route('/download/{accountId}/{blobId}/{name}', download),
     Route('/.well-known/jmap', well_known_jmap),
 ]
-
+auth_backend = BasicAuthBackend(MYSQL_CONNECT)
 middleware = [
     Middleware(CORSMiddleware, allow_origins=['*'], allow_headers=['authorization'], allow_methods=['*']),
-    Middleware(AuthenticationMiddleware, backend=BasicAuthBackend()),
+    Middleware(AuthenticationMiddleware, backend=auth_backend),
 ]
+
+async def startup():
+    await auth_backend.startup()
+
+async def shutdown():
+    await auth_backend.shutdown()
 
 app = Starlette(
     debug=True,
     routes=routes,
     middleware=middleware,
+    on_startup=[startup],
+    on_shutdown=[shutdown],
 )

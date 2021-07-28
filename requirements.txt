@@ -1,6 +1,8 @@
+aioboto3
 aiofiles
 aiohttp
 aioimaplib
+aiomysql
 aiosmtplib
 lxml
 orjson

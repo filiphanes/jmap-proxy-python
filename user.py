@@ -1,5 +1,7 @@
 import binascii
+from urllib.parse import urlparse
 
+import aiomysql
 from starlette.authentication import AuthenticationBackend, AuthenticationError, BaseUser, AuthCredentials
 
 from jmap import errors
@@ -12,10 +14,11 @@ class User(BaseUser):
     User can have access to multiple (shared) accounts.
     User has one personal account.
     """
-    def __init__(self, username: str, password: str, loop=None) -> None:
+    def __init__(self, db, username: str, password: str, loop=None) -> None:
         self.username = username
         self.accounts = {
-            username: UserAccount(username, password, loop=loop),
+            # accountId is currently same as username (user@example.com)
+            username: UserAccount(db, username, password, loop=loop),
         }
         self.sessionState = '0'
 
@@ -42,9 +45,31 @@ class User(BaseUser):
 
 
 class BasicAuthBackend(AuthenticationBackend):
-    def __init__(self):
+    def __init__(self, connect_url):
         self.users = {}
-    
+        self.connect_url = connect_url
+
+    async def startup(self):
+        import os
+        url = urlparse(self.connect_url)
+        await self.db_pool = await aiomysql.create_pool(
+            host=url.hostname,
+            port=url.port,
+            user=url.username,
+            password=url.password,
+            db=url.path[1:],
+            charset=os.getenv('MYSQL_CHARSET', 'UTF-8'),
+            use_unicode=True,
+            autocommit=False
+        )
+
+    async def shutdown(self):
+        try:
+            self.db_pool.close()
+            await self.db_pool.wait_closed()
+        except Exception:
+            pass
+
     async def authenticate(self, request):
         if "Authorization" not in request.headers:
             return
@@ -59,7 +84,7 @@ class BasicAuthBackend(AuthenticationBackend):
 
         if decoded not in self.users:
             username, _, password = decoded.partition(":")
-            user = User(username, password)
+            user = User(self.db_pool, username, password)
             await user.ainit()
             self.users[decoded] = user
 

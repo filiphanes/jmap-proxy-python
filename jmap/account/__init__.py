@@ -1,11 +1,12 @@
 from .personal import PersonalAccount
 from .imap import ImapAccount
 from .smtp import SmtpAccountMixin
+from .smtp_scheduled import SmtpScheduledAccountMixin
 from .storage import ProxyBlobMixin
 
 
 class UserAccount(ImapAccount, ProxyBlobMixin, SmtpAccountMixin, PersonalAccount):
-    def __init__(self,
+    def __init__(self, db,
                  username, password,
                  imap_host='localhost', imap_port=143,
                  storage_path='http://localhost:8888/',
@@ -15,7 +16,7 @@ class UserAccount(ImapAccount, ProxyBlobMixin, SmtpAccountMixin, PersonalAccount
         ImapAccount.__init__(self, username, password, imap_host, imap_port, loop)
         # FileBlobMixin.__init__(self, storage_path)
         ProxyBlobMixin.__init__(self, storage_path)
-        SmtpAccountMixin.__init__(self, username, password, smtp_host, smtp_port, email=username)
+        SmtpScheduledAccountMixin.__init__(self, db, username, password, smtp_host, smtp_port, email=username)
 
     async def ainit(self):
         await ImapAccount.ainit(self)
