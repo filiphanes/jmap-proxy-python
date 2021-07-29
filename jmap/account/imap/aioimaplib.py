@@ -480,6 +480,19 @@ class IMAP4ClientProtocol(asyncio.Protocol):
         return response
 
     @change_state
+    async def authenticate(self, typ, token):
+        response = await self.execute(
+            Command('AUTHENTICATE', self.new_tag(), typ, token, loop=self.loop))
+
+        if 'OK' == response.result:
+            self.state = AUTH
+            for line in response.lines:
+                match = capability_re.search(line)
+                if match:
+                    self.update_capabilities(match.group(1))
+        return response
+
+    @change_state
     async def logout(self):
         response = await self.execute(Command('LOGOUT', self.new_tag(), loop=self.loop))
         if 'OK' == response.result:
@@ -778,6 +791,9 @@ class IMAP4(object):
 
     async def login(self, user, password):
         return await asyncio.wait_for(self.protocol.login(user, password), self.timeout)
+
+    async def authenticate(self, typ, token):
+        return await asyncio.wait_for(self.protocol.authenticate(typ, token), self.timeout)
 
     async def logout(self):
         if self.protocol is not None:
