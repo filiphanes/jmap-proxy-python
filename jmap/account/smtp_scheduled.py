@@ -98,8 +98,8 @@ class SmtpScheduledAccountMixin:
                                   onSuccessUpdateEmail=None,
                                   onSuccessDestroyEmail=None):
         async with self.db.acquire() as conn:
-            async with conn.cursor() as c:
-                oldState = await self.emailsubmission_state(c)
+            async with conn.cursor() as cursor:
+                oldState = await self.emailsubmission_state(cursor)
                 try:
                     if ifInState and int(ifInState) != oldState:
                         raise errors.stateMismatch({"newState": str(oldState)})
@@ -113,51 +113,11 @@ class SmtpScheduledAccountMixin:
                 if create:
                     emailIds = [e['emailId'] for e in create.values()]
                     await self.fill_emails(['blobId'], emailIds)
-                else:
-                    create = {}
-                for cid, submission in create.items():
-                    identity = self.identities.get(submission['identityId'])
-                    if identity is None:
-                        raise errors.notFound(f"Identity {submission['identityId']} not found")
-                    email = self.emails.get(submission['emailId'], None)
-                    if not email:
-                        raise errors.notFound(f"EmailId {submission['emailId']} not found")
+                    for cid, submission in create.items():
+                        created[cid] = self.create_emailsubmission(submission, newState, cursor)
+                        idmap.set(cid, created[cid]['id'])
 
-                    body = await self.download(email['blobId'])
-                    message = HeadersBytesParser.parse_from_bytes(body)
-                    try:
-                        sendAt = parsedate_to_datetime(message.get('Date').encode())
-                    except AttributeError:
-                        sendAt = datetime.now()
-                    except Exception:
-                        notCreated[cid] = errors.invalidEmail('Date header parse error').to_dict()
-                        continue
-
-                    submissionId = uuid4().hex
-                    try:
-                        self.emailsubmission_body_upload(submissionId, body)
-                    except errors.JmapError as e:
-                        notCreated[cid] = e.to_dict()
-                        continue
-
-                    try:
-                        await c.execute('''INSERT INTO emailSubmissions
-                            (id, sendAt, identityId, envelope, undoStatus, created)
-                            VALUES (%s,%s,%s,%s,%s,%s);''', [
-                                submissionId,
-                                sendAt,
-                                identity['id'],
-                                json.dumps(submission.get('envelope')),
-                                'pending',
-                                newState,
-                            ])
-                    except Exception as e:
-                        notCreated[cid] = errors.serverFail(str(e)).to_dict()
-                        continue
-
-                    idmap.set(cid, submissionId)
-                    created[cid] = {'id': submissionId}
-
+                # UPDATE
                 updated = []
                 notUpdated = {}
                 for submissionId, data in (update or {}).items():
@@ -165,23 +125,24 @@ class SmtpScheduledAccountMixin:
                         if data['undoStatus'] != 'canceled':
                             notUpdated[submissionId] = errors.invalidArguments('undoStatus can be only canceled').to_dict()
                             continue
-                        await c.execute('UPDATE emailSubmissions SET updated=%s, undoStatus=%s WHERE accountId=%s AND id=%s',
+                        await cursor.execute('UPDATE emailSubmissions SET updated=%s, undoStatus=%s WHERE accountId=%s AND id=%s',
                                         [newState, data['undoStatus'], self.id, submissionId])
-                        if c.rowcount == 0:
+                        if cursor.rowcount == 0:
                             notUpdated[submissionId] = errors.notFound().to_dict()
                     except Exception as e:
                         notUpdated[submissionId] = errors.notFound().to_dict()
-                        continue
 
+                # DESTROY
                 destroyed = []
                 notDestroyed = {}
                 for submissionId in (destroy or ()):
                     try:
-                        await c.execute('UPDATE emailSubmissions SET destroyed=%s WHERE accountId=%s AND id=%s', [newState, self.id, submissionId])
+                        await cursor.execute('UPDATE emailSubmissions SET destroyed=%s WHERE accountId=%s AND id=%s',
+                                             [newState, self.id, submissionId])
                     except Exception as e:
                         notDestroyed[submissionId] = errors.notFound().to_dict()
-                        continue
-                await c.commit()
+
+                await cursor.commit()
 
         result = {
             "accountId": self.id,
@@ -215,6 +176,42 @@ class SmtpScheduledAccountMixin:
                 update_result['method_name'] = 'Email/set'
                 return result, update_result
         return result
+
+    async def create_emailsubmission(self, submission, newState, cursor):
+        identity = self.identities.get(submission['identityId'])
+        if identity is None:
+            raise errors.notFound(f"Identity {submission['identityId']} not found")
+        email = self.emails.get(submission['emailId'], None)
+        if not email:
+            raise errors.notFound(f"EmailId {submission['emailId']} not found")
+
+        body = await self.download(email['blobId'])
+        message = HeadersBytesParser.parse_from_bytes(body)
+        try:
+            sendAt = parsedate_to_datetime(message.get('Date').encode())
+        except AttributeError:
+            sendAt = datetime.now()
+        except Exception:
+            raise errors.invalidEmail('Date header parse error').to_dict()
+
+        submissionId = uuid4().hex
+        self.emailsubmission_body_upload(submissionId, body)
+
+        try:
+            await cursor.execute('''INSERT INTO emailSubmissions
+                (id, sendAt, identityId, envelope, undoStatus, created)
+                VALUES (%s,%s,%s,%s,%s,%s);''', [
+                    submissionId,
+                    sendAt,
+                    identity['id'],
+                    json.dumps(submission.get('envelope')),
+                    'pending',
+                    newState,
+                ])
+        except Exception as e:
+            raise errors.serverFail(str(e)).to_dict()
+
+        return {'id': submissionId}
 
     async def emailsubmission_state(self, cursor=None):
         """Return state as integer, needs to be stringified for JMAP"""
@@ -382,3 +379,133 @@ class SmtpScheduledAccountMixin:
             'updated': updated_ids,
             'destroyed': destroyed_ids,
         }
+
+    async def emailsubmission_query(self, sort=None, filter=None, position=None, limit=None,
+                                    anchor=None, anchorOffset=None, calculateTotal=False):
+        out = {
+            'accountId': self.id,
+            'canCalculateChanges': False,
+        }
+
+        if limit is not None (not isinstance(limit, int) or limit < 0):
+            raise errors.invalidArguments('limit has to be positive integer')
+        elif limit > 1000:
+            limit = 1000
+            out['limit'] = limit
+
+        sql = bytearray(b'SELECT id FROM emailSubmission')
+        where = bytearray(b' WHERE accountId=%s')
+        args = [self.id]
+        if filter:
+            sql += b' AND '
+            to_sql_where(filter, where, args)
+        if sort:
+            sql += b' SORT BY '
+            to_sql_sort(sort, sql)
+        if position and not anchor:
+            if not isinstance(position, int) or position < 0:
+                raise errors.invalidArguments('position has to be positive integer')
+            sql += b' OFFSET %s'
+            args.append(position)
+            sql += b' LIMIT %s'
+            args.append(limit)
+
+        async with self.db.acquire() as conn:
+            async with conn.cursor() as cursor:
+                if calculateTotal:
+                    await cursor.execute('SELECT COUNT(*) FROM emailSubmission' + where.decode(), args)
+                    out['total'], = await cursor.fetchone()
+                out['queryState'] = await self.emailsubmission_state(cursor)  #TODO: calc state of query
+                sql += where
+                out['ids'] = [id for id, in await cursor.execute(sql.decode(), args)]
+
+        if anchor:
+            try:
+                position = out['ids'].index(anchor)
+            except ValueError:
+                raise errors.anchorNotFound()
+            position += max(0, anchorOffset or 0)
+            out['ids'] = out['ids'][position:position+limit]
+        out['position'] = position
+
+        return out
+
+
+def to_sql_where(criteria, sql: bytearray, args: list):
+    if 'operator' in criteria:
+        operator = criteria['operator']
+        conds = criteria['conditions']
+        if not conds:
+            raise errors.unsupportedFilter(f"Empty filter conditions")
+        if operator == 'NOT':
+            sql += b'NOT ('
+            to_sql_where(conds, sql, args)
+            sql += b')'
+        elif operator == 'AND':
+            sql += b'('
+            for c in conds:
+                to_sql_where(c, sql, args)
+                sql += b')AND('
+            sql += b')'
+        elif operator == 'OR':
+            sql += b'('
+            for c in conds:
+                to_sql_where(c, sql, args)
+                sql += b')OR('
+            sql += b')'
+        else:
+            raise errors.unsupportedFilter(f"Invalid operator {operator}")
+        return
+
+    for crit, value in criteria.items():
+        if not value:
+            raise errors.unsupportedFilter(f"Empty value in criteria")
+        if 'identityIds' == crit:
+            sql += b'identityId IN ('
+            for _ in value:
+                sql += b'%s,'
+            sql.pop()
+            sql[-1] = b')'
+            args.extend(value)
+        elif 'emailIds' == crit:
+            sql += b'emailId IN ('
+            for _ in value:
+                sql += b'%s,'
+            sql.pop()
+            sql[-1] = b')'
+            args.extend(value)
+        elif 'threadIds' == crit:
+            sql += b'threadId IN ('
+            for _ in value:
+                sql += b'%s,'
+            sql.pop()
+            sql[-1] = b')'
+            args.extend(value)
+        elif 'undoStatus' == crit:
+            sql += b'undoStatus=%s'
+            args.append(value)
+        elif 'before' == crit:
+            sql += b'sendAt<%s'
+            args.append(value)
+        elif 'after' == crit:
+            sql += b'sendAt>=%s'
+            args.append(value)
+        else:
+            raise UserWarning(f'Filter {crit} not supported')
+        sql += b' AND '
+    if criteria:
+        sql.pop()
+
+
+def to_sql_sort(sort, sql: bytearray):
+    for crit in sort:
+        if crit['property'] in {'emailId', 'thredId', 'sentAt'}:
+            sql += crit['property'].encode()
+        else:
+            raise errors.unsupportedSort(f"Property {crit['property']} is not sortable")
+        if crit.get('isAscending', True):
+            sql += b' ASC,'
+        else:
+            sql += b' DESC,'
+    if sort:
+        sql.pop()
