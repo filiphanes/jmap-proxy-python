@@ -21,23 +21,46 @@ S3_BUCKET = os.getenv('S3_BUCKET', 'jmap')
 
 EMAIL_SUBMISSION_PROPERTIES = set('id identityId accountId emailId threadId envelope sendAt undoStatus deliveryStatus dsnBlobIds mdnBlobIds'.split())
 '''
-CREATE TABLE emailSubmissions IF NOT EXISTS (
-    id UUID PRIMARY KEY,
-    accountId VARCHAR,
-    identityId VARCHAR,
-    emailId VARCHAR,
-    threadId VARCHAR,
-    envelope VARCHAR,
-    sendAt DATETIME,
-    undoStatus VARCHAR,
-    smtpReply VARCHAR,
-    delivered VARCHAR,
-    displayed TINYINT,
-    created INT,
-    updated INT,
-    destroyed INT
-)
-'''
+CREATE TABLE emailSubmissions (
+  `id` VARCHAR(64) NOT NULL,
+  `accountId` VARCHAR(64) NOT NULL,
+  `identityId` VARCHAR(64) NOT NULL,
+  `emailId` VARCHAR(64) NOT NULL,
+  `threadId` VARCHAR(64) NULL,
+  `blobId` VARCHAR(64) NULL,
+  `envelope` TEXT(64000) NULL,
+  `sendAt` DATETIME NULL,
+  `undoStatus` TINYINT NOT NULL DEFAULT 0,
+  `smtpReply` TEXT(64000) NULL,
+  `delivered` TINYINT NOT NULL DEFAULT 0,
+  `displayed` TINYINT NOT NULL DEFAULT 0,
+  `created` INT UNSIGNED NOT NULL DEFAULT 0,
+  `updated` INT UNSIGNED NULL,
+  `destroyed` INT UNSIGNED NULL,
+  PRIMARY KEY (`id`),
+  INDEX `accountId` (`accountId` ASC)
+);'''
+
+PENDING = 0
+FINAL = 1
+CANCELED = 2
+UNKNOWN = 0
+YES = 1
+NO = 2
+QUEUED = 3
+undoStatus_map = {
+    'pending': PENDING, 'final': FINAL, 'canceled': CANCELED,
+    PENDING: 'pending', FINAL: 'final', CANCELED: 'canceled',
+}
+delivered_map = {
+    'unknown': UNKNOWN, 'yes': YES, 'no': NO, 'queued': QUEUED,
+    UNKNOWN: 'unknown', YES: 'yes', NO: 'no', QUEUED: 'queued',
+}
+displayed_map = {
+    'unknown': UNKNOWN, 'yes': YES,
+    UNKNOWN: 'unknown', YES: 'yes',
+}
+
 
 class SmtpScheduledAccountMixin:
     """
@@ -112,9 +135,9 @@ class SmtpScheduledAccountMixin:
                 notCreated = {}
                 if create:
                     emailIds = [e['emailId'] for e in create.values()]
-                    await self.fill_emails(['blobId'], emailIds)
+                    await self.fill_emails(['blobId', 'threadId'], emailIds)
                     for cid, submission in create.items():
-                        created[cid] = self.create_emailsubmission(submission, newState, cursor)
+                        created[cid] = await self.create_emailsubmission(submission, newState, cursor)
                         idmap.set(cid, created[cid]['id'])
 
                 # UPDATE
@@ -122,11 +145,12 @@ class SmtpScheduledAccountMixin:
                 notUpdated = {}
                 for submissionId, data in (update or {}).items():
                     try:
-                        if data['undoStatus'] != 'canceled':
+                        undoStatus = undoStatus_map[data['undoStatus']]
+                        if undoStatus != CANCELED:
                             notUpdated[submissionId] = errors.invalidArguments('undoStatus can be only canceled').to_dict()
                             continue
                         await cursor.execute('UPDATE emailSubmissions SET updated=%s, undoStatus=%s WHERE accountId=%s AND id=%s',
-                                        [newState, data['undoStatus'], self.id, submissionId])
+                                        [newState, undoStatus, self.id, submissionId])
                         if cursor.rowcount == 0:
                             notUpdated[submissionId] = errors.notFound().to_dict()
                     except Exception as e:
@@ -195,17 +219,21 @@ class SmtpScheduledAccountMixin:
             raise errors.invalidEmail('Date header parse error').to_dict()
 
         submissionId = uuid4().hex
-        self.emailsubmission_body_upload(submissionId, body)
+        upload_res = await self.upload(body)
 
         try:
             await cursor.execute('''INSERT INTO emailSubmissions
-                (id, sendAt, identityId, envelope, undoStatus, created)
-                VALUES (%s,%s,%s,%s,%s,%s);''', [
+                (id, accountId, identityId, emailId, threadId, blobId, sendAt, envelope, undoStatus, created)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s);''', [
                     submissionId,
-                    sendAt,
+                    self.id,
                     identity['id'],
+                    submission['emailId'],
+                    email['threadId'],
+                    upload_res['blobId'],
+                    sendAt,
                     json.dumps(submission.get('envelope')),
-                    'pending',
+                    PENDING,
                     newState,
                 ])
         except Exception as e:
@@ -215,29 +243,30 @@ class SmtpScheduledAccountMixin:
 
     async def emailsubmission_state(self, cursor=None):
         """Return state as integer, needs to be stringified for JMAP"""
-        sql = 'SELECT MAX(MAX(created, updated, destroyed)) FROM emailSubmission WHERE accoundId=%s'
+        # destroyed > updated > created or NULL if not set and created NOT NULL
+        sql = 'SELECT MAX(COALESCE(destroyed, updated, created)) FROM emailSubmissions WHERE accountId=%s'
         if cursor is None:
             async with self.db.acquire() as conn:
                 async with conn.cursor() as cursor:
-                    for state, in await cursor.execute(sql, [self.id]):
-                        return state
+                    await cursor.execute(sql, [self.id])
+                    status, = await cursor.fetchone()
         else:
-                    for state, in await cursor.execute(sql, [self.id]):
-                        return state
-        return 0
+                    await cursor.execute(sql, [self.id])
+                    status, = await cursor.fetchone()
+        return status or 0
 
     async def emailsubmission_state_low(self, cursor=None):
         # created state is first so there will be lowest state
-        sql = 'SELECT MIN(created) FROM emailSubmission WHERE accoundId=%s'
+        sql = 'SELECT MIN(created) FROM emailSubmissions WHERE accountId=%s'
         if cursor is None:
             async with self.db.acquire() as conn:
                 async with conn.cursor() as cursor:
-                    for state, in await cursor.execute(sql, [self.id]):
-                        return state
+                    await cursor.execute(sql, [self.id])
+                    status, = await cursor.fetchone()
         else:
-                    for state, in await cursor.execute(sql, [self.id]):
-                        return state
-        return 0
+                    await cursor.execute(sql, [self.id])
+                    status, = await cursor.fetchone()
+        return status or 0
 
     async def emailsubmission_body_get(id) -> bytes:
         async with aioboto3.client(**S3_CREDENTIALS) as s3_client:
@@ -297,11 +326,13 @@ class SmtpScheduledAccountMixin:
                 for submission in await c.execute(sql, sql_args):
                     if 'envelope' in submission:
                         submission['envelope'] = json.loads(submission['envelope'])
+                    if 'undoStatus' in submission:
+                        submission['undoStatus'] = undoStatus_map[submission['undoStatus']]
                     if 'deliveryStatus' in properties:  # subdict from columns
                         submission['deliveryStatus'] = {
                             'smtpReply': submission.pop('smtpReply'),
-                            'delivered': submission.pop('delivered'),
-                            'displayed': 'yes' if submission.pop('displayed') else 'unknown',
+                            'delivered': delivered_map[submission.pop('delivered')],
+                            'displayed': displayed_map[submission.pop('displayed')],
                         }
                     if 'dsnBlobIds' in properties:
                         submission['dsnBlobIds'] = []
@@ -340,11 +371,16 @@ class SmtpScheduledAccountMixin:
                 newState = 0
                 changes = 0
                 hasMoreChanges = False
+                # COALESCE(destroyed, updated, created) calculates maximum value
+                # because destroyed > updated > created and NULL if not set and created is NOT NULL
+                # GREATEST(created, updated, destroyed) can be used on MariaDB,
+                # but COALESCE is supported on more databases
                 sql = '''SELECT id, COALESCE(created, 0), COALESCE(updated, 0), COALESCE(destroyed, 0)
-                         WHERE accountId=%s
-                         AND MAX(created, updated, destroyed) > %s)
-                         ORDER BY MAX(created, updated, destroyed) ASC
-                         LIMIT %s'''
+                    FROM jmap.emailSubmissions
+                    WHERE accountId=%s
+                      AND COALESCE(destroyed, updated, created) > %s
+                    ORDER BY COALESCE(destroyed, updated, created) ASC
+                    LIMIT %s'''
                 await cursor.execute(sql, [self.id, sinceState, maxChanges+1])
                 for id, created, updated, destroyed in await cursor.fetchmany(maxChanges):
                     if created > sinceState:
@@ -434,25 +470,30 @@ class SmtpScheduledAccountMixin:
 def to_sql_where(criteria, sql: bytearray, args: list):
     if 'operator' in criteria:
         operator = criteria['operator']
-        conds = criteria['conditions']
+        try:
+            conds = criteria['conditions']
+        except KeyError:
+            raise errors.unsupportedFilter(f"missing conditions in FilterOperator")
         if not conds:
             raise errors.unsupportedFilter(f"Empty filter conditions")
-        if operator == 'NOT':
-            sql += b'NOT ('
-            to_sql_where(conds, sql, args)
-            sql += b')'
-        elif operator == 'AND':
-            sql += b'('
+        if 'NOT' == operator:
+            sql += b'NOT(('
             for c in conds:
                 to_sql_where(c, sql, args)
-                sql += b')AND('
-            sql += b')'
-        elif operator == 'OR':
+                sql += b')OR('
+            sql[-3:] = b')'
+        elif 'OR' == operator:
             sql += b'('
             for c in conds:
                 to_sql_where(c, sql, args)
                 sql += b')OR('
-            sql += b')'
+            del sql[-3:]
+        elif 'AND' == operator:
+            sql += b'('
+            for c in conds:
+                to_sql_where(c, sql, args)
+                sql += b')AND('
+            del sql[-4:]
         else:
             raise errors.unsupportedFilter(f"Invalid operator {operator}")
         return
@@ -460,46 +501,33 @@ def to_sql_where(criteria, sql: bytearray, args: list):
     for crit, value in criteria.items():
         if not value:
             raise errors.unsupportedFilter(f"Empty value in criteria")
-        if 'identityIds' == crit:
-            sql += b'identityId IN ('
+        #TODO: check value types
+        if crit in {'identityIds', 'emailIds', 'threadIds'}:
+            sql += crit.encode()[:-1]
+            sql += b' IN ('
             for _ in value:
                 sql += b'%s,'
-            sql.pop()
-            sql[-1] = b')'
-            args.extend(value)
-        elif 'emailIds' == crit:
-            sql += b'emailId IN ('
-            for _ in value:
-                sql += b'%s,'
-            sql.pop()
-            sql[-1] = b')'
-            args.extend(value)
-        elif 'threadIds' == crit:
-            sql += b'threadId IN ('
-            for _ in value:
-                sql += b'%s,'
-            sql.pop()
-            sql[-1] = b')'
+            sql[-1] = ord(b')')
             args.extend(value)
         elif 'undoStatus' == crit:
             sql += b'undoStatus=%s'
-            args.append(value)
+            args.append(undoStatus_map[value])
         elif 'before' == crit:
             sql += b'sendAt<%s'
-            args.append(value)
+            args.append(datetime.fromisoformat(value))
         elif 'after' == crit:
             sql += b'sendAt>=%s'
-            args.append(value)
+            args.append(datetime.fromisoformat(value))
         else:
-            raise UserWarning(f'Filter {crit} not supported')
+            raise errors.unsupportedFilter(f'Filter {crit} not supported')
         sql += b' AND '
-    if criteria:
-        sql.pop()
+    if criteria:  # remove ' AND '
+        del sql[-5:]
 
 
 def to_sql_sort(sort, sql: bytearray):
     for crit in sort:
-        if crit['property'] in {'emailId', 'thredId', 'sentAt'}:
+        if crit['property'] in {'emailId', 'threadId', 'sendAt'}:
             sql += crit['property'].encode()
         else:
             raise errors.unsupportedSort(f"Property {crit['property']} is not sortable")

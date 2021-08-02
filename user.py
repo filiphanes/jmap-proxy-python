@@ -52,7 +52,7 @@ class BasicAuthBackend(AuthenticationBackend):
     async def startup(self):
         import os
         url = urlparse(self.connect_url)
-        await self.db_pool = await aiomysql.create_pool(
+        self.db_pool = await aiomysql.create_pool(
             host=url.hostname,
             port=url.port,
             user=url.username,

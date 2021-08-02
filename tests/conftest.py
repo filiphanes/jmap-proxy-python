@@ -1,4 +1,5 @@
 import asyncio
+import os
 
 import pytest
 
@@ -27,6 +28,86 @@ async def user(accountId, event_loop):
 @pytest.fixture()
 def account(user, accountId):
     return user.get_account(accountId)
+
+
+
+@pytest.fixture()
+def smtp_scheduled_account(db_pool, accountId, email_id, email_id2):
+    from jmap.account.smtp_scheduled import SmtpScheduledAccountMixin
+    from jmap import errors
+    class AccountMock(SmtpScheduledAccountMixin):
+        def __init__(self, db, username, password, smtp_host, smtp_port, email):
+            self.id = username
+            self.name = username
+            self.capabilities = {}
+            super().__init__(db, username, password=password, smtp_host=smtp_host, smtp_port=smtp_port, email=email)
+            self.emails = {
+                email_id: {
+                    'blobId': 'blob1',
+                    'threadId': 'thread1',
+                },
+                email_id2: {
+                    'blobId': 'blob2',
+                    'threadId': 'thread2',
+                },
+            }
+            self.blobs = {
+                'blob1': b'''body1''',
+                'blob2': b'''body2''',
+            }
+
+        async def email_set(self, idmap, ifInState=None, create=None, update=None, destroy=None):
+            return {
+                'accountId': self.id,
+                'oldState': '1',
+                'newState': '2',
+                'created': list(create.keys()),
+                'notCreated': None,
+                'updated': list(update.keys()),
+                'notUpdated': None,
+                'destroyed': destroy,
+                'notDestroyed': None,
+            }
+        
+        async def fill_emails(self, properties, ids):
+            pass  # tested emails are already filled in self.emails
+
+        async def upload(self, content, typ=''):
+            blobId = str(hash(content))
+            self.blobs[blobId] = content
+            return {
+                'accountId': self.id,
+                'blobId': blobId,
+                'size': len(content),
+                'type': typ,
+            }
+
+        async def download(self, blobId):
+            try:
+                return self.blobs[blobId]
+            except KeyError:
+                raise errors.notFound()
+
+    return AccountMock(db_pool, accountId, 'h', '127.0.0.1', 25, accountId)
+
+
+@pytest.fixture()
+@pytest.mark.asyncio
+async def db_pool():
+    import aiomysql
+    db_pool = await aiomysql.create_pool(
+        host='127.0.0.1',
+        port=3306,
+        user='root',
+        password='',
+        db='jmap',
+        charset=os.getenv('MYSQL_CHARSET', 'utf8'),
+        use_unicode=True,
+        autocommit=False
+    )
+    yield db_pool
+    db_pool.close()
+    await db_pool.wait_closed()
 
 
 @pytest.fixture()
