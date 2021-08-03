@@ -23,14 +23,20 @@ def api_Core_echo(request, **kwargs):
     return kwargs
 
 
-def api_Blob_copy(request, fromAccountId, accountId, blobIds):
+async def api_Blob_copy(request, fromAccountId, accountId, blobIds):
     fromAccount = request['user'].get_account(fromAccountId)
     account = request['user'].get_account(accountId)
+    copied = {}
+    for blobId in blobIds:
+        body = await fromAccount.download(blobId)
+        res = await account.upload(body)
+        copied[blobId] = res['blobId']
+
     return {
         'fromAccountId': fromAccountId,
         'accountId': accountId,
-        'copied': None,
-        'notCopied': {id: errors.serverFail('Blob/copy not implemented') for id in blobIds},
+        'copied': copied or None,
+        'notCopied': None,
     }
 
 

@@ -29,8 +29,7 @@ def api_EmailSubmission_changes(request, accountId, **kwargs):
     return request['user'].get_account(accountId).emailsubmission_changes(**kwargs)
 
 def api_EmailSubmission_queryChanges(request, accountId, **kwargs):
-    return request['user'].get_account(accountId).emailsubmission_changes(**kwargs)
-
+    return request['user'].get_account(accountId).emailsubmission_query_changes(**kwargs)
 
 def api_Identity_get(request, accountId, **kwargs):
     return request['user'].get_account(accountId).identity_get(**kwargs)

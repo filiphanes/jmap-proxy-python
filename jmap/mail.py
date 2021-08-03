@@ -37,16 +37,44 @@ def api_Email_changes(request, accountId, **kwargs):
     return request['user'].get_account(accountId).email_changes(**kwargs)
 
 def api_Email_queryChanges(request, accountId, **kwargs):
-    return request['user'].get_account(accountId).email_queryChanges(**kwargs)
-
-def api_Email_copy(request, accountId, **kwargs):
-    raise NotImplementedError()
+    return request['user'].get_account(accountId).email_query_changes(**kwargs)
 
 def api_Email_import(request, accountId, **kwargs):
     return request['user'].get_account(accountId).email_import(**kwargs)
 
 def api_Email_parse(request, accountId, **kwargs):
     return request['user'].get_account(accountId).email_parse(**kwargs)
+
+def api_Email_copy(request, accountId, fromAccountId, ifFromInState=None, ifInState=None,
+                   create=None, onSuccessDestroyOriginal=False, destroyFromIfInState=None):
+    raise NotImplementedError()
+    try:
+        fromAccount = request['user'].get_account(fromAccountId)
+    except errors.accountNotFound:
+        raise errors.fromAccountNotFound()
+    toAccount = request['user'].get_account(accountId)
+    if create is None:
+        create = {}
+    res_get = await fromAccountId.email_get(ids=[data['id'] for data in create.items()])
+    if res_get['state'] != ifFromInState:
+        raise errors.stateMismatch('ifFromInState mismatch')
+    # TODO: merge res_get['list'] with create
+    res_set = toAccount.email_set(ifInState=ifInState, create={cid: data})
+    out = {
+        'fromAccountId': fromAccountId,
+        'accountId': accountId,
+        'oldState': res_get['state'],
+        'newState': res_set['newState'],
+        'created': res_set['created'],
+        'notCreated': res_set['notCreated'],
+    }
+    if onSuccessDestroyOriginal and res_create['created']:
+        destroy = [data['id'] for data in res_create['created'].items()]
+        res_destroy = await fromAccount.email_set(ifInState=destroyFromIfInState, destroy=destroy)
+        res_destroy['method'] = 'Email/set'
+        return out, res_destroy
+    return out
+
 
 def api_Mailbox_get(request, accountId, **kwargs):
     return request['user'].get_account(accountId).mailbox_get(request['idmap'], **kwargs)

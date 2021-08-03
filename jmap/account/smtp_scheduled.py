@@ -19,7 +19,6 @@ from jmap.parse import HeadersBytesParser
 S3_CREDENTIALS = os.getenv('S3_CREDENTIALS', '')
 S3_BUCKET = os.getenv('S3_BUCKET', 'jmap')
 
-EMAIL_SUBMISSION_PROPERTIES = set('id identityId accountId emailId threadId envelope sendAt undoStatus deliveryStatus dsnBlobIds mdnBlobIds'.split())
 '''
 CREATE TABLE emailSubmissions (
   `id` VARCHAR(64) NOT NULL,
@@ -41,26 +40,6 @@ CREATE TABLE emailSubmissions (
   INDEX `accountId` (`accountId` ASC)
 );'''
 
-PENDING = 0
-FINAL = 1
-CANCELED = 2
-UNKNOWN = 0
-YES = 1
-NO = 2
-QUEUED = 3
-undoStatus_map = {
-    'pending': PENDING, 'final': FINAL, 'canceled': CANCELED,
-    PENDING: 'pending', FINAL: 'final', CANCELED: 'canceled',
-}
-delivered_map = {
-    'unknown': UNKNOWN, 'yes': YES, 'no': NO, 'queued': QUEUED,
-    UNKNOWN: 'unknown', YES: 'yes', NO: 'no', QUEUED: 'queued',
-}
-displayed_map = {
-    'unknown': UNKNOWN, 'yes': YES,
-    UNKNOWN: 'unknown', YES: 'yes',
-}
-
 
 class SmtpScheduledAccountMixin:
     """
@@ -78,49 +57,12 @@ class SmtpScheduledAccountMixin:
             "maxDelayedSend": 44236800  # 512 days
         },
 
-        self.identities = {
-            self.smtp_user: {
-                'id': self.smtp_user,
-                'name': self.name or self.smtp_user,
-                'email': self.email,
-                'replyTo': None,
-                'bcc': None,
-                'textSignature': "",
-                'htmlSignature': "",
-                'mayDelete': False,
-            }
-        }
-
-    async def identity_get(self, idmap, ids=None):
-        lst = []
-        notFound = []
-        if ids is None:
-            ids = self.identities.keys()
-
-        for id in ids:
-            try:
-                lst.append(self.identities[idmap.get(id)])
-            except KeyError:
-                notFound.append(id)
-
-        return {
-            'accountId': self.id,
-            'state': '1',
-            'list': lst,
-            'notFound': notFound,
-        }
-
-    async def indentity_set(self, idmap, ifInState=None, create=None, update=None, destroy=None):
-        raise NotImplemented()
-
-    async def identity_changes(self, sinceState, maxChanges=None):
-        raise errors.cannotCalculateChanges()
-
     async def emailsubmission_set(self, idmap, ifInState=None,
                                   create=None, update=None, destroy=None,
                                   onSuccessUpdateEmail=None,
                                   onSuccessDestroyEmail=None):
         async with self.db.acquire() as conn:
+            await conn.begin()
             async with conn.cursor() as cursor:
                 oldState = await self.emailsubmission_state(cursor)
                 try:
@@ -137,36 +79,43 @@ class SmtpScheduledAccountMixin:
                     emailIds = [e['emailId'] for e in create.values()]
                     await self.fill_emails(['blobId', 'threadId'], emailIds)
                     for cid, submission in create.items():
-                        created[cid] = await self.create_emailsubmission(submission, newState, cursor)
-                        idmap.set(cid, created[cid]['id'])
+                        try:
+                            created[cid] = await self.create_emailsubmission(submission, newState, cursor)
+                            idmap.set(cid, created[cid]['id'])
+                        except errors.JmapError as e:
+                            notCreated[cid] = e.to_dict()
+                        except Exception as e:
+                            notCreated[cid] = errors.serverFail().to_dict()
 
                 # UPDATE
                 updated = []
                 notUpdated = {}
-                for submissionId, data in (update or {}).items():
+                for id, data in (update or {}).items():
                     try:
                         undoStatus = undoStatus_map[data['undoStatus']]
                         if undoStatus != CANCELED:
-                            notUpdated[submissionId] = errors.invalidArguments('undoStatus can be only canceled').to_dict()
+                            notUpdated[id] = errors.invalidArguments('undoStatus can be only canceled').to_dict()
                             continue
                         await cursor.execute('UPDATE emailSubmissions SET updated=%s, undoStatus=%s WHERE accountId=%s AND id=%s',
-                                        [newState, undoStatus, self.id, submissionId])
+                                        [newState, undoStatus, self.id, id])
                         if cursor.rowcount == 0:
-                            notUpdated[submissionId] = errors.notFound().to_dict()
+                            notUpdated[id] = errors.notFound().to_dict()
                     except Exception as e:
-                        notUpdated[submissionId] = errors.notFound().to_dict()
+                        notUpdated[id] = errors.notFound().to_dict()
 
                 # DESTROY
                 destroyed = []
                 notDestroyed = {}
-                for submissionId in (destroy or ()):
+                for id in (destroy or ()):
                     try:
                         await cursor.execute('UPDATE emailSubmissions SET destroyed=%s WHERE accountId=%s AND id=%s',
-                                             [newState, self.id, submissionId])
+                                             [newState, self.id, id])
+                        if cursor.rowcount == 0:
+                            notDestroyed[id] = errors.notFound().to_dict()
                     except Exception as e:
-                        notDestroyed[submissionId] = errors.notFound().to_dict()
-
-                await cursor.commit()
+                        notDestroyed[id] = errors.serverFail().to_dict()
+            # TODO: rollback
+            await conn.commit()
 
         result = {
             "accountId": self.id,
@@ -189,6 +138,8 @@ class SmtpScheduledAccountMixin:
                 patch = onSuccessUpdateEmail.get(f"#{id}", None)
                 if patch:
                     updateEmail[create[id]['emailId']] = patch
+            if onSuccessDestroyEmail is None:
+                onSuccessDestroyEmail = []
             destroyEmail = [id for id in successfull if f"#{id}" in onSuccessDestroyEmail]
 
             if updateEmail or destroyEmail:
@@ -202,10 +153,9 @@ class SmtpScheduledAccountMixin:
         return result
 
     async def create_emailsubmission(self, submission, newState, cursor):
-        identity = self.identities.get(submission['identityId'])
-        if identity is None:
+        if submission['identityId'] not in self.identities:
             raise errors.notFound(f"Identity {submission['identityId']} not found")
-        email = self.emails.get(submission['emailId'], None)
+        email = self.emails.get(submission['emailId'])
         if not email:
             raise errors.notFound(f"EmailId {submission['emailId']} not found")
 
@@ -216,7 +166,7 @@ class SmtpScheduledAccountMixin:
         except AttributeError:
             sendAt = datetime.now()
         except Exception:
-            raise errors.invalidEmail('Date header parse error').to_dict()
+            raise errors.invalidEmail('Date header parse error')
 
         submissionId = uuid4().hex
         upload_res = await self.upload(body)
@@ -227,7 +177,7 @@ class SmtpScheduledAccountMixin:
                 VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s);''', [
                     submissionId,
                     self.id,
-                    identity['id'],
+                    submission['identityId'],
                     submission['emailId'],
                     email['threadId'],
                     upload_res['blobId'],
@@ -237,7 +187,7 @@ class SmtpScheduledAccountMixin:
                     newState,
                 ])
         except Exception as e:
-            raise errors.serverFail(str(e)).to_dict()
+            raise errors.serverFail(str(e))
 
         return {'id': submissionId}
 
@@ -323,7 +273,8 @@ class SmtpScheduledAccountMixin:
         lst = []
         async with self.db.acquire() as conn:
             async with conn.cursor(aiomysql.DictCursor) as c:
-                for submission in await c.execute(sql, sql_args):
+                await c.execute(sql, sql_args)
+                for submission in await c.fetchall():
                     if 'envelope' in submission:
                         submission['envelope'] = json.loads(submission['envelope'])
                     if 'undoStatus' in submission:
@@ -336,8 +287,8 @@ class SmtpScheduledAccountMixin:
                         }
                     if 'dsnBlobIds' in properties:
                         submission['dsnBlobIds'] = []
-                    if 'mdnblobIds' in properties:
-                        submission['mdnblobIds'] = []
+                    if 'mdnBlobIds' in properties:
+                        submission['mdnBlobIds'] = []
                     notFound.discard(submission['id'])
                     lst.append(submission)
                 state = await self.emailsubmission_state(c)
@@ -360,9 +311,9 @@ class SmtpScheduledAccountMixin:
             raise errors.invalidArguments('maxChanges is not positive integer')
 
         async with self.db.acquire() as conn:
-            async with conn.cursor(aiomysql.DictCursor) as cursor:
+            async with conn.cursor() as cursor:
                 lowestState = await self.emailsubmission_state_low(cursor)
-                if sinceState <= lowestState:
+                if sinceState < lowestState:
                     raise errors.cannotCalculateChanges()
 
                 created_ids = []
@@ -371,7 +322,7 @@ class SmtpScheduledAccountMixin:
                 newState = 0
                 changes = 0
                 hasMoreChanges = False
-                # COALESCE(destroyed, updated, created) calculates maximum value
+                # COALESCE(destroyed, updated, created) returns maximum value
                 # because destroyed > updated > created and NULL if not set and created is NOT NULL
                 # GREATEST(created, updated, destroyed) can be used on MariaDB,
                 # but COALESCE is supported on more databases
@@ -423,37 +374,41 @@ class SmtpScheduledAccountMixin:
             'canCalculateChanges': False,
         }
 
-        if limit is not None (not isinstance(limit, int) or limit < 0):
+        if limit is not None and (not isinstance(limit, int) or limit < 0):
             raise errors.invalidArguments('limit has to be positive integer')
         elif limit > 1000:
             limit = 1000
             out['limit'] = limit
 
-        sql = bytearray(b'SELECT id FROM emailSubmission')
+        sql = bytearray(b'SELECT id FROM emailSubmissions')
         where = bytearray(b' WHERE accountId=%s')
         args = [self.id]
         if filter:
-            sql += b' AND '
+            where += b' AND '
             to_sql_where(filter, where, args)
+            sql += where
         if sort:
-            sql += b' SORT BY '
+            sql += b' ORDER BY '
             to_sql_sort(sort, sql)
-        if position and not anchor:
-            if not isinstance(position, int) or position < 0:
-                raise errors.invalidArguments('position has to be positive integer')
-            sql += b' OFFSET %s'
-            args.append(position)
-            sql += b' LIMIT %s'
-            args.append(limit)
 
         async with self.db.acquire() as conn:
             async with conn.cursor() as cursor:
                 if calculateTotal:
-                    await cursor.execute('SELECT COUNT(*) FROM emailSubmission' + where.decode(), args)
+                    await cursor.execute('SELECT COUNT(*) FROM emailSubmissions' + where.decode(), args)
                     out['total'], = await cursor.fetchone()
-                out['queryState'] = await self.emailsubmission_state(cursor)  #TODO: calc state of query
-                sql += where
-                out['ids'] = [id for id, in await cursor.execute(sql.decode(), args)]
+
+                if position and not anchor:
+                    if not isinstance(position, int) or position < 0:
+                        raise errors.invalidArguments('position has to be positive integer')
+                    sql += b' OFFSET %s'
+                    args.append(position)
+                    sql += b' LIMIT %s'
+                    args.append(limit)
+
+                # MAYBE: calc more exact state of query
+                out['queryState'] = str(await self.emailsubmission_state(cursor))
+                await cursor.execute(sql.decode(), args)
+                out['ids'] = [id for id, in await cursor.fetchall()]
 
         if anchor:
             try:
@@ -465,6 +420,12 @@ class SmtpScheduledAccountMixin:
         out['position'] = position
 
         return out
+
+    async def emailsubmission_query_changes(self, sort=None, filter=None,
+                                            sinceQueryState=None, maxChanges=None,
+                                            upToId=None, calculateTotal=False):
+        raise errors.cannotCalculateChanges()
+
 
 
 def to_sql_where(criteria, sql: bytearray, args: list):
@@ -504,7 +465,7 @@ def to_sql_where(criteria, sql: bytearray, args: list):
         #TODO: check value types
         if crit in {'identityIds', 'emailIds', 'threadIds'}:
             sql += crit.encode()[:-1]
-            sql += b' IN ('
+            sql += b' IN('
             for _ in value:
                 sql += b'%s,'
             sql[-1] = ord(b')')
@@ -537,3 +498,26 @@ def to_sql_sort(sort, sql: bytearray):
             sql += b' DESC,'
     if sort:
         sql.pop()
+
+
+EMAIL_SUBMISSION_PROPERTIES = set('id identityId accountId emailId threadId envelope sendAt undoStatus deliveryStatus dsnBlobIds mdnBlobIds'.split())
+
+PENDING = 0
+FINAL = 1
+CANCELED = 2
+UNKNOWN = 0
+YES = 1
+NO = 2
+QUEUED = 3
+undoStatus_map = {
+    'pending': PENDING, 'final': FINAL, 'canceled': CANCELED,
+    PENDING: 'pending', FINAL: 'final', CANCELED: 'canceled',
+}
+delivered_map = {
+    'unknown': UNKNOWN, 'yes': YES, 'no': NO, 'queued': QUEUED,
+    UNKNOWN: 'unknown', YES: 'yes', NO: 'no', QUEUED: 'queued',
+}
+displayed_map = {
+    'unknown': UNKNOWN, 'yes': YES,
+    UNKNOWN: 'unknown', YES: 'yes',
+}

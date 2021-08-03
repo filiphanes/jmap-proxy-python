@@ -1,8 +1,7 @@
-import asyncio
-import itertools
 from datetime import datetime
-import re
+import itertools
 from operator import itemgetter
+import re
 
 from jmap import errors
 from jmap.core import MAX_OBJECTS_IN_GET
@@ -13,31 +12,29 @@ from .email import ImapEmail, EmailState, keyword2flag
 from .mailbox import ImapMailbox
 
 
-class ImapAccount:
+class ImapAccountMixin:
     """JMAP user Account using IMAP as backend"""
 
-    def __init__(self, username, password='h', host='localhost', port=143, loop=None):
-        self.capabilities = {
-            "urn:ietf:params:jmap:mail": {
-                "maxSizeMailboxName": 490,
-                "maxSizeAttachmentsPerEmail": 50000000,
-                "mayCreateTopLevelMailbox": True,
-                "maxMailboxesPerEmail": 1,  # IMAP implementation
-                "maxMailboxDepth": None,
-                "emailQuerySortOptions": [
-                    "receivedAt",
-                    # "from",
-                    # "to",
-                    "subject",
-                    "size",
-                    # "header.x-spam-score"
-                ]
-            }
+    def __init__(self, username=None, password='h', auth=None, host='localhost', port=143, loop=None):
+        self.capabilities["urn:ietf:params:jmap:mail"] = {
+            "maxSizeMailboxName": 490,
+            "maxSizeAttachmentsPerEmail": 50000000,
+            "mayCreateTopLevelMailbox": True,
+            "maxMailboxesPerEmail": 1,  # IMAP implementation
+            "maxMailboxDepth": None,
+            "emailQuerySortOptions": [
+                "receivedAt",
+                # "from",
+                # "to",
+                "subject",
+                "size",
+                # "header.x-spam-score"
+            ]
         }
-        self.id = username
         self.name = username
         self.username = username
         self.password = password
+        self.auth = auth
 
         self.mailboxes = {}
         self.byimapname = {}
@@ -350,6 +347,12 @@ class ImapAccount:
         if limit != limit2:
             out['limit'] = limit2
         return out
+
+    async def email_query_changes(self, sort=None, filter=None,
+                                  sinceQueryState=None, maxChanges=None,
+                                  upToId=None, calculateTotal=False):
+        raise errors.cannotCalculateChanges()
+
 
     async def email_get(self, idmap, ids=None, properties=None, bodyProperties=None,
                         fetchTextBodyValues=False, fetchHTMLBodyValues=False,

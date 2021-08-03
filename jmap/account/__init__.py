@@ -1,25 +1,31 @@
 from .personal import PersonalAccount
-from .imap import ImapAccount
-from .smtp import SmtpAccountMixin
+from .imap import ImapAccountMixin
+from .smtp.simple import SmtpAccountMixin
 from .smtp_scheduled import SmtpScheduledAccountMixin
 from .storage import ProxyBlobMixin
 
 
-class UserAccount(ImapAccount, ProxyBlobMixin, SmtpAccountMixin, PersonalAccount):
+class UserAccount(ImapAccountMixin, ProxyBlobMixin, SmtpAccountMixin, PersonalAccount):
+    """
+    This class is responsible for mixing implementations of account methods and capabilities
+    """
+
     def __init__(self, db,
-                 username, password,
+                 username=None, password=None, auth=None,
                  imap_host='localhost', imap_port=143,
                  storage_path='http://localhost:8888/',
                  smtp_host='localhost', smtp_port=25,
                  loop=None,
                  ):
-        ImapAccount.__init__(self, username, password, imap_host, imap_port, loop)
+        self.id = username
+        self.capabilities = {}
+        ImapAccountMixin.__init__(self, username, password, auth, imap_host, imap_port, loop)
         # FileBlobMixin.__init__(self, storage_path)
         ProxyBlobMixin.__init__(self, storage_path)
         SmtpScheduledAccountMixin.__init__(self, db, username, password, smtp_host, smtp_port, email=username)
 
     async def ainit(self):
-        await ImapAccount.ainit(self)
+        await ImapAccountMixin.ainit(self)
 
     async def upload(self, stream, type=None):
         # Overrides ImapAccount.upload
@@ -29,4 +35,4 @@ class UserAccount(ImapAccount, ProxyBlobMixin, SmtpAccountMixin, PersonalAccount
         try:
             return await ProxyBlobMixin.download(self, blobId)
         except Exception:
-            return await ImapAccount.download(self, blobId)
+            return await ImapAccountMixin.download(self, blobId)
