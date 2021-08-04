@@ -1,6 +1,8 @@
-data/
+.benchmarks/
+.coverage
+.pytest_cache/
+__pycache__/
 .env
 *.pyc
-.pytest_cache/
-.coverage
-htmlcov/
+/data/
+/htmlcov/
