@@ -1,9 +1,10 @@
+from jmap.core.http import HttpBlobMixin
 from jmap.mail.imap import ImapAccountMixin
 from jmap.submission.smtp_scheduled import SmtpScheduledAccountMixin
-from jmap.core.http import HttpBlobMixin
+from jmap.vacationresponse.db import DbVacationResponseMixin
 
 
-class UserAccount(ImapAccountMixin, HttpBlobMixin, SmtpScheduledAccountMixin):
+class UserAccount(ImapAccountMixin, HttpBlobMixin, SmtpScheduledAccountMixin, DbVacationResponseMixin):
     """
     This class is responsible for mixing implementations of account methods and capabilities
     """
@@ -23,6 +24,7 @@ class UserAccount(ImapAccountMixin, HttpBlobMixin, SmtpScheduledAccountMixin):
         # FileBlobMixin.__init__(self, storage_path)
         HttpBlobMixin.__init__(self, storage_path)
         SmtpScheduledAccountMixin.__init__(self, db, username, password, smtp_host, smtp_port, email=username)
+        DbVacationResponseMixin.__init__(self, db)
 
     async def ainit(self):
         await ImapAccountMixin.ainit(self)

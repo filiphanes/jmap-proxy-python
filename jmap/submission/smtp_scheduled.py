@@ -1,13 +1,11 @@
 from datetime import datetime
 from email.utils import parsedate_to_datetime
-import os
 from uuid import uuid4
 try:
     import orjson as json
 except ImportError:
     import json
 
-import aioboto3
 import aiomysql
 import aiosmtplib
 
@@ -16,9 +14,6 @@ from jmap.core import MAX_OBJECTS_IN_GET
 from jmap.parse import HeadersBytesParser
 
 
-S3_CREDENTIALS = os.getenv('S3_CREDENTIALS', '')
-S3_BUCKET = os.getenv('S3_BUCKET', 'jmap')
-
 '''
 CREATE TABLE emailSubmissions (
   `id` VARCHAR(64) NOT NULL,
@@ -26,7 +21,6 @@ CREATE TABLE emailSubmissions (
   `identityId` VARCHAR(64) NOT NULL,
   `emailId` VARCHAR(64) NOT NULL,
   `threadId` VARCHAR(64) NULL,
-  `blobId` VARCHAR(64) NULL,
   `envelope` TEXT(64000) NULL,
   `sendAt` DATETIME NULL,
   `undoStatus` TINYINT NOT NULL DEFAULT 0,
@@ -45,8 +39,9 @@ class SmtpScheduledAccountMixin:
     """
     Implements email submission and identities
     """
-    def __init__(self, db, username, password=None, smtp_host='localhost', smtp_port=25, email=None):
+    def __init__(self, db, storage, username, password=None, smtp_host='localhost', smtp_port=25, email=None):
         self.db = db
+        self.storage = storage
         self.smtp_user = username
         self.smtp_pass = password
         self.smtp_host = smtp_host
@@ -55,7 +50,7 @@ class SmtpScheduledAccountMixin:
         self.capabilities["urn:ietf:params:jmap:submission"] = {
             "submissionExtensions": [],
             "maxDelayedSend": 44236800  # 512 days
-        },
+        }
 
     async def emailsubmission_set(self, idmap, ifInState=None,
                                   create=None, update=None, destroy=None,
@@ -169,18 +164,17 @@ class SmtpScheduledAccountMixin:
             raise errors.invalidEmail('Date header parse error')
 
         submissionId = uuid4().hex
-        upload_res = await self.upload(body)
+        await self.storage.put(f'/{submissionId}', body)
 
         try:
             await cursor.execute('''INSERT INTO emailSubmissions
-                (id, accountId, identityId, emailId, threadId, blobId, sendAt, envelope, undoStatus, created)
+                (id, accountId, identityId, emailId, threadId, sendAt, envelope, undoStatus, created)
                 VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s);''', [
                     submissionId,
                     self.id,
                     submission['identityId'],
                     submission['emailId'],
                     email['threadId'],
-                    upload_res['blobId'],
                     sendAt,
                     json.dumps(submission.get('envelope')),
                     PENDING,
@@ -217,29 +211,6 @@ class SmtpScheduledAccountMixin:
                     await cursor.execute(sql, [self.id])
                     status, = await cursor.fetchone()
         return status or 0
-
-    async def emailsubmission_body_get(id) -> bytes:
-        async with aioboto3.client(**S3_CREDENTIALS) as s3_client:
-            res = await s3_client.get_object(Bucket=S3_BUCKET, Key=id)
-            res = res['ResponseMetadata']
-            if res["HTTPStatusCode"] != 200:
-                raise errors.serverFail(f'S3 PUT returned status={res["HTTPStatusCode"]}')
-            return await res['Body'].read()
-
-    async def emailsubmission_body_put(id, body):
-        async with aioboto3.client(**S3_CREDENTIALS) as s3_client:
-            res = await s3_client.put_object(Bucket=S3_BUCKET, Key=id, Body=body)
-            res = res['ResponseMetadata']
-            if res["HTTPStatusCode"] != 200:
-                raise errors.serverFail(f'S3 PUT returned status={res["HTTPStatusCode"]}')
-
-    async def emailsubmission_body_delete(id):
-        res = await s3_client.delete_object(Bucket=S3_BUCKET, Key=id)
-        res = res['ResponseMetadata']
-        if res['HTTPStatusCode'] == 204:
-            raise errors.notFound(f'Email submission {id} not found')
-        elif res['HTTPStatusCode'] != 204:
-            raise errors.serverFail(f'Failed to remove S3 file, status={res["HTTPStatusCode"]}')
 
     async def emailsubmission_get(self, idmap, ids=None, properties=None):
         if properties:
@@ -425,6 +396,14 @@ class SmtpScheduledAccountMixin:
                                             sinceQueryState=None, maxChanges=None,
                                             upToId=None, calculateTotal=False):
         raise errors.cannotCalculateChanges()
+
+    async def emailsubmission_send_scheduled(self):
+        """Sends scheduled emails, intended to be in called in short intervals (ie. by cron)"""
+        raise NotImplementedError()
+
+    async def emailsubmission_cleanup(self):
+        """Deletes old destroyed objects"""
+        raise NotImplementedError()
 
 
 
