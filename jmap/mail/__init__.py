@@ -45,7 +45,7 @@ def api_Email_import(request, accountId, **kwargs):
 def api_Email_parse(request, accountId, **kwargs):
     return request['user'].get_account(accountId).email_parse(**kwargs)
 
-def api_Email_copy(request, accountId, fromAccountId, ifFromInState=None, ifInState=None,
+async def api_Email_copy(request, accountId, fromAccountId, ifFromInState=None, ifInState=None,
                    create=None, onSuccessDestroyOriginal=False, destroyFromIfInState=None):
     raise NotImplementedError()
     try:
@@ -57,7 +57,7 @@ def api_Email_copy(request, accountId, fromAccountId, ifFromInState=None, ifInSt
         create = {}
     res_get = await fromAccountId.email_get(ids=[data['id'] for data in create.items()])
     if res_get['state'] != ifFromInState:
-        raise errors.stateMismatch('ifFromInState mismatch')
+        raise errors.stateMismatch('ifFromInState mismatch', newState=res_get['state'])
     # TODO: merge res_get['list'] with create
     res_set = toAccount.email_set(ifInState=ifInState, create={cid: data})
     out = {

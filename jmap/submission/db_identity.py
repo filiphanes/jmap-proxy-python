@@ -1,30 +1,34 @@
 from uuid import uuid4
 
+from aiomysql import DictCursor
+from pymysql.err import IntegrityError
 try:
     import orjson as json
 except ImportError:
     import json
 
 from jmap import errors
+from jmap.core import MAX_OBJECTS_IN_GET
 
-
-'''
+CREATE_TABLE_SQL = '''
 CREATE TABLE identities (
   `id` VARCHAR(64) NOT NULL,
   `accountId` VARCHAR(64) NOT NULL,
   `name` VARCHAR(120) NULL,
-  `email` VARCHAR(120) NULL,
-  `replyTo` TEXT(64000) NULL,
-  `bcc` TEXT(64000) NULL,
-  `textSignature` TEXT(64000) NOT NULL DEFAULT '',
-  `htmlSignature` TEXT(64000) NOT NULL DEFAULT '',
+  `email` VARCHAR(120) NOT NULL,
+  `replyTo` TEXT NULL,
+  `bcc` TEXT NULL,
+  `textSignature` TEXT NOT NULL DEFAULT '',
+  `htmlSignature` TEXT NOT NULL DEFAULT '',
   `mayDelete` TINYINT NOT NULL DEFAULT 0,
-  `created` INT UNSIGNED NOT NULL DEFAULT 0,
-  `updated` INT UNSIGNED NULL,
-  `destroyed` INT UNSIGNED NULL,
+  `created` INT NOT NULL DEFAULT 0,
+  `updated` INT NULL,
+  `destroyed` INT NULL,
   PRIMARY KEY (`id`),
-  INDEX `accountId` (`accountId` ASC)
-);'''
+  UNIQUE INDEX `accountIdEmail` (`accountId` ASC, `email` ASC));
+'''
+
+IDENTITY_PROPERTIES = {'id', 'name', 'email', 'replyTo', 'bcc', 'textSignature', 'htmlSignature', 'mayDelete'}
 
 
 class DbIdentityMixin:
@@ -33,38 +37,7 @@ class DbIdentityMixin:
     """
     def __init__(self, db):
         self.db = db
-
-        self.identities = {
-            self.smtp_user: {
-                'id': self.smtp_user,
-                'name': self.name or self.smtp_user,
-                'email': self.email,
-                'replyTo': None,
-                'bcc': None,
-                'textSignature': "",
-                'htmlSignature': "",
-                'mayDelete': False,
-            }
-        }
-
-    async def identity_get(self, idmap, ids=None, properties=None):
-        lst = []
-        notFound = []
-        if ids is None:
-            ids = self.identities.keys()
-
-        for id in ids:
-            try:
-                lst.append(self.identities[idmap.get(id)])
-            except KeyError:
-                notFound.append(id)
-
-        return {
-            'accountId': self.id,
-            'state': '1',
-            'list': lst,
-            'notFound': notFound,
-        }
+        self.identities = {}
 
     async def identity_state(self, cursor=None):
         """Return state as integer, needs to be stringified for JMAP"""
@@ -93,16 +66,16 @@ class DbIdentityMixin:
                     status, = await cursor.fetchone()
         return status or 0
         
-    async def indentity_set(self, idmap, ifInState=None, create=None, update=None, destroy=None):
+    async def identity_set(self, idmap, ifInState=None, create=None, update=None, destroy=None):
         async with self.db.acquire() as conn:
             await conn.begin()
             async with conn.cursor() as cursor:
                 oldState = await self.identity_state(cursor)
                 try:
                     if ifInState and int(ifInState) != oldState:
-                        raise errors.stateMismatch({"newState": str(oldState)})
+                        raise errors.stateMismatch('ifInState mismatch', newState=oldState)
                 except ValueError:
-                    raise errors.stateMismatch({"newState": str(oldState)})
+                    raise errors.stateMismatch('ifInState mismatch', newState=oldState)
                 newState = oldState + 1
 
                 # CREATE
@@ -188,10 +161,56 @@ class DbIdentityMixin:
                     1,
                     newState,
                 ])
+        except IntegrityError:
+            await cursor.execute('SELECT id FROM identities WHERE accountId=%s AND email=%s',
+                                 [self.id, identity['email']])
+            existingId, = await cursor.fetchone()
+            raise errors.alreadyExists('Identity with this email already exists.', existingId=existingId)
         except Exception as e:
-            raise errors.serverFail(str(e))
+            raise errors.serverFail(repr(e))
 
         return {'id': identityId}
+
+
+    async def identity_get(self, idmap, ids=None, properties=None):
+        if properties:
+            properties = set(properties)
+            if not properties.issubset(IDENTITY_PROPERTIES):
+                raise errors.invalidProperties(properties=list(properties - IDENTITY_PROPERTIES))
+            properties.add('id')  # always present
+        else:
+            properties = IDENTITY_PROPERTIES
+
+        # Build SQL
+        # don't afraid of injection, properties are checked against IDENTITY_PROPERTIES
+        sql = f"SELECT {','.join(properties)} FROM identities WHERE accountId=%s"
+        sql_args = [self.id]
+        if ids:
+            if len(ids) > MAX_OBJECTS_IN_GET:
+                raise errors.tooLarge('Requested more than {MAX_OBJECTS_IN_GET} ids')
+            notFound = set([idmap.get(id) for id in ids])
+            sql += ' AND id IN (' + ('%s,'*len(notFound))[:-1] + ')'
+            sql_args.extend(notFound)
+        else:
+            notFound = set()
+
+        # TODO: raise proper errors.tooLarge, when count > MAX_OBJECTS_IN_GET
+        sql += f' LIMIT {MAX_OBJECTS_IN_GET}'
+
+        lst = []
+        async with self.db.acquire() as conn:
+            async with conn.cursor(DictCursor) as c:
+                await c.execute(sql, sql_args)
+                lst = await c.fetchall()
+                notFound.difference_update([data['id'] for data in lst])
+                state = await self.identity_state(c)
+
+        return {
+            'accountId': self.id,
+            'list': lst,
+            'state': str(state),
+            'notFound': list(notFound),
+        }
 
     async def identity_changes(self, sinceState, maxChanges=None):
         try:
@@ -205,7 +224,7 @@ class DbIdentityMixin:
 
         async with self.db.acquire() as conn:
             async with conn.cursor() as cursor:
-                lowestState = await self.emailsubmission_state_low(cursor)
+                lowestState = await self.identity_state_low(cursor)
                 if sinceState < lowestState:
                     raise errors.cannotCalculateChanges()
 
@@ -215,6 +234,7 @@ class DbIdentityMixin:
                 newState = 0
                 changes = 0
                 hasMoreChanges = False
+                created, updated, destroyed = 0, 0, 0
                 # COALESCE(destroyed, updated, created) returns maximum value
                 # because destroyed > updated > created and NULL if not set and created is NOT NULL
                 # GREATEST(created, updated, destroyed) can be used on MariaDB,
@@ -259,6 +279,3 @@ class DbIdentityMixin:
             'updated': updated_ids,
             'destroyed': destroyed_ids,
         }
-
-
-ALL_IDENTITY_PROPERTIES = set('id name email replyTo bcc textSignature htmlSignature mayDelete'.split())

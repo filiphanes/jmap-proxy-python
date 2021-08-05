@@ -63,7 +63,7 @@ class SmtpAccountMixin:
                                   onSuccessDestroyEmail=None):
         oldState = await self.emailsubmission_state()
         if ifInState and ifInState != oldState:
-            raise errors.stateMismatch({"newState": oldState})
+            raise errors.stateMismatch('ifInState mismatch', newState=oldState)
 
         # CREATE
         created = {}

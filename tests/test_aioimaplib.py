@@ -1,4 +1,4 @@
-from jmap.account.imap.aioimaplib import encode_messageset
+from jmap.mail.imap.aioimaplib import encode_messageset
 
 
 def test_encode_messageset():

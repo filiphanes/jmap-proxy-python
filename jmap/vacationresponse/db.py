@@ -31,7 +31,7 @@ class DbVacationResponseMixin:
         if properties:
             properties = set(properties)
             if not properties.issubset(VACATION_RESPONSE_PROPERTIES):
-                raise errors.invalidProperties(f'Invalid {properties - VACATION_RESPONSE_PROPERTIES}')
+                raise errors.invalidProperties(properties=list(properties - VACATION_RESPONSE_PROPERTIES))
 
         if ids is None:
             ids = []
@@ -63,25 +63,23 @@ class DbVacationResponseMixin:
                 oldState = await self.vacationresponse_state(cursor)
                 try:
                     if ifInState and int(ifInState) != oldState:
-                        raise errors.stateMismatch({"newState": str(oldState)})
+                        raise errors.stateMismatch('ifInState mismatch', newState=oldState)
                 except ValueError:
-                    raise errors.stateMismatch({"newState": str(oldState)})
+                    raise errors.stateMismatch('ifInState mismatch', newState=oldState)
                 newState = oldState + 1
 
                 # CREATE
                 created = {}
                 notCreated = {}
                 for cid in (create or {}).keys():
-                    e = errors.invalidArguments('Cannot create more VacationResponses')
-                    notCreated[cid] = e.to_dict()
+                    notCreated[cid] = errors.singleton().to_dict()
 
                 # UPDATE
                 updated = []
                 notUpdated = {}
                 for id, data in (update or {}).items():
                     if id != 'singleton':
-                        e = errors.invalidPatch(f'Exactly one object with id "singleton" exists.')
-                        notUpdated[id] = e.to_dict()
+                        notUpdated[id] = errors.singleton().to_dict()
                         continue
                     try:
                         sql = 'UPDATE vacationResponses SET '
@@ -107,8 +105,7 @@ class DbVacationResponseMixin:
                 destroyed = []
                 notDestroyed = {}
                 for id in (destroy or ()):
-                    e = errors.invalidArguments('VacationResponse object cannot be destroyed.')
-                    notDestroyed[id] = e.to_dict()
+                    notDestroyed[id] = errors.singleton().to_dict()
             await conn.commit()
 
         return {

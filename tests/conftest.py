@@ -3,6 +3,8 @@ import os
 
 import pytest
 
+from jmap import errors
+
 
 @pytest.fixture()
 def event_loop():
@@ -30,30 +32,59 @@ def account(user, accountId):
     return user.get_account(accountId)
 
 
+@pytest.fixture()
+@pytest.mark.asyncio
+async def db_identity_account(db_pool, accountId):
+    from jmap.submission.db_identity import DbIdentityMixin, CREATE_TABLE_SQL
+    class AccountMock(DbIdentityMixin):
+        def __init__(self, db, accountId):
+            self.id = accountId
+            self.name = accountId
+            self.capabilities = {}
+            super().__init__(db)
+
+    async with db_pool.acquire() as conn:
+        async with conn.cursor() as cursor:
+            await cursor.execute('DROP TABLE identities;')
+            await cursor.execute(CREATE_TABLE_SQL)
+
+    return AccountMock(db_pool, accountId)
+
 
 @pytest.fixture()
-def smtp_scheduled_account(db_pool, accountId, email_id, email_id2):
-    from jmap.account.smtp_scheduled import SmtpScheduledAccountMixin
-    from jmap import errors
+@pytest.mark.asyncio
+async def smtp_scheduled_account(db_pool, accountId, email_id, email_id2):
+    from jmap.submission.smtp_scheduled import SmtpScheduledAccountMixin, CREATE_TABLE_SQL
+    blobId1 = 'blob1'
+    blobId2 = 'blob2'
+    class DictStorage(dict):
+        async def get(self, path):
+            return self[path]
+        async def put(self, path, body):
+            self[path] = body
+        async def delete(self, path):
+            del self[path]
+
     class AccountMock(SmtpScheduledAccountMixin):
         def __init__(self, db, username, password, smtp_host, smtp_port, email):
             self.id = username
             self.name = username
             self.capabilities = {}
-            super().__init__(db, username, password=password, smtp_host=smtp_host, smtp_port=smtp_port, email=email)
+            storage = DictStorage()
+            super().__init__(db, storage, username, password=password, smtp_host=smtp_host, smtp_port=smtp_port, email=email)
             self.emails = {
                 email_id: {
-                    'blobId': 'blob1',
+                    'blobId': blobId1,
                     'threadId': 'thread1',
                 },
                 email_id2: {
-                    'blobId': 'blob2',
+                    'blobId': blobId2,
                     'threadId': 'thread2',
                 },
             }
             self.blobs = {
-                'blob1': b'''body1''',
-                'blob2': b'''body2''',
+                blobId1: b'''body1''',
+                blobId2: b'''body2''',
             }
 
         async def email_set(self, idmap, ifInState=None, create=None, update=None, destroy=None):
@@ -62,25 +93,12 @@ def smtp_scheduled_account(db_pool, accountId, email_id, email_id2):
                 'oldState': '1',
                 'newState': '2',
                 'created': {cid:{'id':'123','blobId':'123'} for cid,data in (create or {}).items()},
-                'notCreated': None,
                 'updated': list(update.keys()) if update else None,
-                'notUpdated': None,
                 'destroyed': destroy,
-                'notDestroyed': None,
             }
         
         async def fill_emails(self, properties, ids):
             pass  # tested emails are already filled in self.emails
-
-        async def upload(self, content, typ=''):
-            blobId = str(hash(content))
-            self.blobs[blobId] = content
-            return {
-                'accountId': self.id,
-                'blobId': blobId,
-                'size': len(content),
-                'type': typ,
-            }
 
         async def download(self, blobId):
             try:
@@ -88,6 +106,10 @@ def smtp_scheduled_account(db_pool, accountId, email_id, email_id2):
             except KeyError:
                 raise errors.notFound()
 
+    async with db_pool.acquire() as conn:
+        async with conn.cursor() as cursor:
+            await cursor.execute('DROP TABLE emailSubmissions;')
+            await cursor.execute(CREATE_TABLE_SQL)
     return AccountMock(db_pool, accountId, 'h', '127.0.0.1', 25, accountId)
 
 

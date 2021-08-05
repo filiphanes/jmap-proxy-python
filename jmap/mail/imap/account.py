@@ -106,7 +106,7 @@ class ImapAccountMixin:
         """https://jmap.io/spec-mail.html#mailboxset"""
         oldState = await self.mailbox_state()
         if ifInState is not None and ifInState != oldState:
-            raise errors.stateMismatch()
+            raise errors.stateMismatch('ifInState mismatch', newState=oldState)
 
         # CREATE
         created = {}
@@ -574,7 +574,7 @@ class ImapAccountMixin:
     async def email_set(self, idmap, ifInState=None, create=None, update=None, destroy=None):
         oldState = await self.email_state()
         if ifInState is not None and ifInState != oldState:
-            raise errors.stateMismatch()
+            raise errors.stateMismatch('ifInState mismatch', newState=oldState)
 
         created, notCreated = await self.create_emails(idmap, create or {})
 
@@ -698,7 +698,7 @@ class ImapAccountMixin:
     async def email_import(self, ifInState=None, emails=()):
         oldState = await self.thread_state()
         if ifInState and ifInState != oldState:
-            raise errors.stateMismatch({'newState': oldState})
+            raise errors.stateMismatch('ifInState mismatch', newState=oldState)
 
         created = {}
         notCreated = {}

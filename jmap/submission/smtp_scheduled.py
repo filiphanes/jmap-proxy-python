@@ -13,9 +13,7 @@ from jmap import errors
 from jmap.core import MAX_OBJECTS_IN_GET
 from jmap.parse import HeadersBytesParser
 
-
-'''
-CREATE TABLE emailSubmissions (
+CREATE_TABLE_SQL = '''CREATE TABLE emailSubmissions (
   `id` VARCHAR(64) NOT NULL,
   `accountId` VARCHAR(64) NOT NULL,
   `identityId` VARCHAR(64) NOT NULL,
@@ -62,9 +60,9 @@ class SmtpScheduledAccountMixin:
                 oldState = await self.emailsubmission_state(cursor)
                 try:
                     if ifInState and int(ifInState) != oldState:
-                        raise errors.stateMismatch({"newState": str(oldState)})
+                        raise errors.stateMismatch('ifInState mismatch', newState=oldState)
                 except ValueError:
-                    raise errors.stateMismatch({"newState": str(oldState)})
+                    raise errors.stateMismatch('ifInState mismatch', newState=oldState)
                 newState = oldState + 1
 
                 # CREATE
@@ -216,7 +214,7 @@ class SmtpScheduledAccountMixin:
         if properties:
             properties = set(properties)
             if not properties.issubset(EMAIL_SUBMISSION_PROPERTIES):
-                raise errors.invalidProperties(f'Invalid {properties - EMAIL_SUBMISSION_PROPERTIES}')
+                raise errors.invalidProperties(properties=list(properties - EMAIL_SUBMISSION_PROPERTIES))
         else:
             properties = EMAIL_SUBMISSION_PROPERTIES
 

@@ -1,4 +1,4 @@
-from jmap.account.imap.imap_utf7 import imap_utf7_decode, imap_utf7_encode
+from jmap.mail.imap.imap_utf7 import imap_utf7_decode, imap_utf7_encode
 
 KNOWN_SPECIALS = set('\\HasChildren \\HasNoChildren \\NoSelect \\NoInferiors \\UnMarked \\Subscribed'.lower().split())
 

@@ -1,15 +1,21 @@
 class JmapError(Exception):
     "Base JMAP Exception"
 
+    def __init__(self, desc=None, **kwargs):
+        if desc is not None:
+            kwargs['description'] = desc
+        self.kwargs = kwargs
+
     def to_dict(self):
-        out = {'type': self.__class__.__name__}
-        desc = str(self)
-        if desc:
-            out['description'] = desc
-        return out
+        if 'type' not in self.kwargs:
+            self.kwargs['type'] = self.__class__.__name__
+        return self.kwargs
 
 class accountNotFound(JmapError):
     "The accountId does not correspond to a valid account."
+
+class alreadyExists(JmapError):
+    "The server forbids duplicates, and the record already exists in the target account."
 
 class fromAccountNotFound(JmapError):
     "The fromAccountId does not correspond to a valid account."
@@ -67,7 +73,6 @@ class unsupportedFilter(JmapError):
 
 class unsupportedSort(JmapError):
     "The sort is syntactically valid, but includes a property the server does not support sorting on, or a collation method it does not recognise."
-
 
 class rateLimit(JmapError):
     "Too many objects of this type have been created recently, and a server-defined rate limit has been reached. It may work if tried again later."
