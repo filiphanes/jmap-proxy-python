@@ -45,8 +45,8 @@ async def db_identity_account(db_pool, accountId):
 
     async with db_pool.acquire() as conn:
         async with conn.cursor() as cursor:
-            await cursor.execute('DROP TABLE identities;')
-            await cursor.execute(CREATE_TABLE_SQL)
+            await cursor.execute('DELETE FROM identities WHERE accountId=%s', [accountId])
+        await conn.commit()
 
     return AccountMock(db_pool, accountId)
 
@@ -108,9 +108,28 @@ async def smtp_scheduled_account(db_pool, accountId, email_id, email_id2):
 
     async with db_pool.acquire() as conn:
         async with conn.cursor() as cursor:
-            await cursor.execute('DROP TABLE emailSubmissions;')
-            await cursor.execute(CREATE_TABLE_SQL)
+            await cursor.execute('DELETE FROM emailSubmissions WHERE accountId=%s', [accountId])
+        await conn.commit()
     return AccountMock(db_pool, accountId, 'h', '127.0.0.1', 25, accountId)
+
+
+@pytest.fixture()
+@pytest.mark.asyncio
+async def db_vacationresponse_account(db_pool, accountId):
+    from jmap.vacationresponse.db import DbVacationResponseMixin
+    class AccountMock(DbVacationResponseMixin):
+        def __init__(self, db, accountId):
+            self.id = accountId
+            self.name = accountId
+            self.capabilities = {}
+            super().__init__(db)
+
+    async with db_pool.acquire() as conn:
+        async with conn.cursor() as cursor:
+            await cursor.execute('DELETE FROM vacationResponses WHERE accountId=%s', [accountId])
+        await conn.commit()
+
+    return AccountMock(db_pool, accountId)
 
 
 @pytest.fixture()
