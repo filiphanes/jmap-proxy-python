@@ -1,5 +1,6 @@
 from datetime import datetime
 from email.utils import parsedate_to_datetime
+from re import sub
 from uuid import uuid4
 try:
     import orjson as json
@@ -146,6 +147,10 @@ class SmtpScheduledAccountMixin:
         return result
 
     async def create_emailsubmission(self, submission, newState, cursor):
+        missingProps = [p for p in ['identityId', 'emailId'] if p not in submission]
+        if missingProps:
+            raise errors.invalidProperties("missing", properties=missingProps)
+        # TODO: identity_get
         if submission['identityId'] not in self.identities:
             raise errors.notFound(f"Identity {submission['identityId']} not found")
         email = self.emails.get(submission['emailId'])
@@ -161,14 +166,16 @@ class SmtpScheduledAccountMixin:
         except Exception:
             raise errors.invalidEmail('Date header parse error')
 
-        submissionId = uuid4().hex
-        await self.storage.put(f'/{submissionId}', body)
+        id = uuid4().hex
+        async with self.storage.put(f'/{id}', body) as res:
+            if res.status >= 400:
+                raise errors.serverFail(f'PUT status={res.status}')
 
         try:
             await cursor.execute('''INSERT INTO emailSubmissions
                 (id, accountId, identityId, emailId, threadId, sendAt, envelope, undoStatus, created)
                 VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s);''', [
-                    submissionId,
+                    id,
                     self.id,
                     submission['identityId'],
                     submission['emailId'],
@@ -179,9 +186,9 @@ class SmtpScheduledAccountMixin:
                     newState,
                 ])
         except Exception as e:
-            raise errors.serverFail(str(e))
+            raise errors.serverFail(repr(e))
 
-        return {'id': submissionId}
+        return {'id': id}
 
     async def emailsubmission_state(self, cursor=None):
         """Return state as integer, needs to be stringified for JMAP"""
@@ -452,10 +459,10 @@ def to_sql_where(criteria, sql: bytearray, args: list):
             args.append(undoStatus_map[value])
         elif 'before' == crit:
             sql += b'sendAt<%s'
-            args.append(datetime.fromisoformat(value))
+            args.append(datetime.fromisoformat(value.rstrip('Z')))
         elif 'after' == crit:
             sql += b'sendAt>=%s'
-            args.append(datetime.fromisoformat(value))
+            args.append(datetime.fromisoformat(value.rstrip('Z')))
         else:
             raise errors.unsupportedFilter(f'Filter {crit} not supported')
         sql += b' AND '

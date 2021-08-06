@@ -57,13 +57,22 @@ async def smtp_scheduled_account(db_pool, accountId, email_id, email_id2):
     from jmap.submission.smtp_scheduled import SmtpScheduledAccountMixin, CREATE_TABLE_SQL
     blobId1 = 'blob1'
     blobId2 = 'blob2'
+    class Response:
+        def __init__(self, status, body=b''):
+            self.status = status
+            self.body = body
+        async def read(self) -> bytes:
+            return self.body
+
     class DictStorage(dict):
         async def get(self, path):
-            return self[path]
+            return Response(200, self[path])
         async def put(self, path, body):
             self[path] = body
+            return Response(201)
         async def delete(self, path):
             del self[path]
+            return Response(204)
 
     class AccountMock(SmtpScheduledAccountMixin):
         def __init__(self, db, username, password, smtp_host, smtp_port, email):

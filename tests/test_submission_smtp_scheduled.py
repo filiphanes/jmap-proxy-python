@@ -14,6 +14,7 @@ async def test_emailsubmission_set(smtp_scheduled_account, idmap, email_id):
         idmap,
         create={
             "1": {
+                "identityId": '1',
                 "emailId": email_id,
                 "envelope": {
                     "mailFrom": {"email": account.id, "parameters": None},
