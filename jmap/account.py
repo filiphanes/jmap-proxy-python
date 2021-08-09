@@ -1,12 +1,12 @@
 from jmap.core.http import HttpBlobMixin
 from jmap.mail.imap import ImapAccountMixin
-from jmap.submission.smtp_scheduled import SmtpScheduledAccountMixin
+from jmap.submission.scheduled import DelayedSubmissionMixin
 from jmap.submission.db_identity import DbIdentityMixin
 from jmap.submission.s3_storage import EmailSubmissionS3Storage
 from jmap.vacationresponse.db import DbVacationResponseMixin
 
 
-class UserAccount(ImapAccountMixin, HttpBlobMixin, SmtpScheduledAccountMixin,
+class UserAccount(ImapAccountMixin, HttpBlobMixin, DelayedSubmissionMixin,
                   DbIdentityMixin, DbVacationResponseMixin):
     """Mixes implementations of account methods and capabilities.
     """
@@ -25,9 +25,8 @@ class UserAccount(ImapAccountMixin, HttpBlobMixin, SmtpScheduledAccountMixin,
         ImapAccountMixin.__init__(self, username, password, auth, imap_host, imap_port, loop)
         # FileBlobMixin.__init__(self, storage_path)
         HttpBlobMixin.__init__(self, storage_path)
-        smtp_storage = EmailSubmissionS3Storage(http_session=http_session)
-        SmtpScheduledAccountMixin.__init__(self, db_pool, smtp_storage,
-            username, password, smtp_host, smtp_port, email=username)
+        scheduled_storage = EmailSubmissionS3Storage(http_session=http_session)
+        DelayedSubmissionMixin.__init__(self, db_pool, scheduled_storage)
         DbIdentityMixin.__init__(self, db_pool)
         DbVacationResponseMixin.__init__(self, db_pool)
 

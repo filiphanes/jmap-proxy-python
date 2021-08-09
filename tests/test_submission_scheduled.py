@@ -2,19 +2,19 @@ from datetime import datetime
 import pytest
 
 from jmap import errors
-from jmap.submission.smtp_scheduled import to_sql_sort, to_sql_where
+from jmap.submission.scheduled import to_sql_sort, to_sql_where
 
 
 @pytest.mark.asyncio
-async def test_emailsubmission_set(smtp_scheduled_account, idmap, email_id):
-    account = smtp_scheduled_account
+async def test_emailsubmission_set(scheduled_account, idmap, email_id):
+    account = scheduled_account
 
     # SET 1
     response = await account.emailsubmission_set(
         idmap,
         create={
             "1": {
-                "identityId": '1',
+                "identityId": 'identity1',
                 "emailId": email_id,
                 "envelope": {
                     "mailFrom": {"email": account.id, "parameters": None},
@@ -58,6 +58,7 @@ async def test_emailsubmission_set(smtp_scheduled_account, idmap, email_id):
         idmap,
         create={
             "2": {
+                "identityId": 'identity1',
                 "emailId": email_id,
                 "envelope": {
                     "mailFrom": {"email": account.id, "parameters": None},
@@ -66,6 +67,7 @@ async def test_emailsubmission_set(smtp_scheduled_account, idmap, email_id):
             }
         }
     )
+    anchorSubmissionId = response['created']['2']['id']
 
     # CHANGES 1
     response = await account.emailsubmission_changes(sinceState="1", maxChanges=1)
@@ -73,7 +75,7 @@ async def test_emailsubmission_set(smtp_scheduled_account, idmap, email_id):
     changes = len(response['created']) \
             + len(response['updated']) \
             + len(response['destroyed'])
-    assert 1 <= changes <= 1
+    assert changes == 1
     assert response['hasMoreChanges'] is False
     assert response['oldState'] == "1"
     assert response['newState'] and response['newState'] != "1"
@@ -83,6 +85,7 @@ async def test_emailsubmission_set(smtp_scheduled_account, idmap, email_id):
         idmap,
         create={
             "3": {
+                "identityId": 'identity1',
                 "emailId": email_id,
                 "sendAt": "2021-08-03 13:03:03",
                 "envelope": {
@@ -106,13 +109,13 @@ async def test_emailsubmission_set(smtp_scheduled_account, idmap, email_id):
 
     # QUERY
     response = await account.emailsubmission_query(
-        filter={"identityIds": [account.id], 'after':'2021-08-03 12:03:02'},
+        filter={"identityIds": ['identity1'], 'after':'2021-08-03 12:03:02'},
         sort=[
             {"property": 'sendAt'},
             {"property": 'emailId'},
             {"property": 'threadId', 'isAscending': False},
         ],
-        anchor="3e5d0b61ff41487c93144336fa482645",
+        anchor=anchorSubmissionId,
         limit=10,
         calculateTotal=True
     )

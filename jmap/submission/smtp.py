@@ -18,45 +18,6 @@ class SmtpAccountMixin:
             "maxDelayedSend": 0
         },
 
-        # static identities, only allows sending from main user email
-        self.identities = {
-            self.smtp_user: {
-                'id': self.smtp_user,
-                'name': self.name or self.smtp_user,
-                'email': self.email,
-                'replyTo': None,
-                'bcc': None,
-                'textSignature': "",
-                'htmlSignature': "",
-                'mayDelete': False,
-            }
-        }
-
-    async def identity_get(self, idmap, ids=None):
-        lst = []
-        notFound = []
-        if ids is None:
-            ids = self.identities.keys()
-
-        for id in ids:
-            try:
-                lst.append(self.identities[idmap.get(id)])
-            except KeyError:
-                notFound.append(id)
-
-        return {
-            'accountId': self.id,
-            'state': '1',
-            'list': lst,
-            'notFound': notFound,
-        }
-
-    async def identity_set(self, idmap, ifInState=None, create=None, update=None, destroy=None):
-        raise NotImplemented()
-
-    async def identity_changes(self, sinceState, maxChanges=None):
-        raise errors.cannotCalculateChanges()
-
     async def emailsubmission_set(self, idmap, ifInState=None,
                                   create=None, update=None, destroy=None,
                                   onSuccessUpdateEmail=None,

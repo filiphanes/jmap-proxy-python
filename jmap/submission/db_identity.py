@@ -1,6 +1,7 @@
 from uuid import uuid4
 
 from aiomysql import DictCursor
+import aiomysql
 from pymysql.err import IntegrityError
 try:
     import orjson as json
@@ -38,6 +39,15 @@ class DbIdentityMixin:
     def __init__(self, db):
         self.db = db
         self.identities = {}
+
+    async def fill_identities(self):
+        """Read ids identities from db to self.identities"""
+        sql = f'SELECT id, name, email FROM identities WHERE accountId=%s'
+        async with self.db.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cursor:
+                await cursor.execute(sql, [self.id])
+                for row in await cursor.fetchall():
+                    self.identities[row['id']] = row
 
     async def identity_state(self, cursor=None):
         """Return state as integer, needs to be stringified for JMAP"""

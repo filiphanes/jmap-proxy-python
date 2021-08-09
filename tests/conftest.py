@@ -35,7 +35,7 @@ def account(user, accountId):
 @pytest.fixture()
 @pytest.mark.asyncio
 async def db_identity_account(db_pool, accountId):
-    from jmap.submission.db_identity import DbIdentityMixin, CREATE_TABLE_SQL
+    from jmap.submission.db_identity import DbIdentityMixin
     class AccountMock(DbIdentityMixin):
         def __init__(self, db, accountId):
             self.id = accountId
@@ -53,28 +53,12 @@ async def db_identity_account(db_pool, accountId):
 
 @pytest.fixture()
 @pytest.mark.asyncio
-async def smtp_scheduled_account(db_pool, accountId, email_id, email_id2):
-    from jmap.submission.smtp_scheduled import SmtpScheduledAccountMixin, CREATE_TABLE_SQL
+async def scheduled_account(db_pool, accountId, email_id, email_id2):
+    from jmap.submission.scheduled import DelayedSubmissionMixin
+    from jmap.submission.dict_storage import DictStorage
     blobId1 = 'blob1'
     blobId2 = 'blob2'
-    class Response:
-        def __init__(self, status, body=b''):
-            self.status = status
-            self.body = body
-        async def read(self) -> bytes:
-            return self.body
-
-    class DictStorage(dict):
-        async def get(self, path):
-            return Response(200, self[path])
-        async def put(self, path, body):
-            self[path] = body
-            return Response(201)
-        async def delete(self, path):
-            del self[path]
-            return Response(204)
-
-    class AccountMock(SmtpScheduledAccountMixin):
+    class AccountMock(DelayedSubmissionMixin):
         def __init__(self, db, username, password, smtp_host, smtp_port, email):
             self.id = username
             self.name = username
@@ -95,6 +79,9 @@ async def smtp_scheduled_account(db_pool, accountId, email_id, email_id2):
                 blobId1: b'''body1''',
                 blobId2: b'''body2''',
             }
+            self.identities = {
+                'identity1': {'id':'identity1'},
+            }
 
         async def email_set(self, idmap, ifInState=None, create=None, update=None, destroy=None):
             return {
@@ -108,6 +95,9 @@ async def smtp_scheduled_account(db_pool, accountId, email_id, email_id2):
         
         async def fill_emails(self, properties, ids):
             pass  # tested emails are already filled in self.emails
+
+        async def fill_identities(self):
+            pass  # tested identities are already filled in self.identities
 
         async def download(self, blobId):
             try:

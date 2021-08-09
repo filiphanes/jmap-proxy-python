@@ -38,7 +38,9 @@ class EmailSubmissionS3Storage:
             headers = {}
         headers['date'] = headers.get('date') or format_date_time(time())
         headers['authorization'] = self._auth('GET', path, headers['date'])
-        return await self.http.get(self.url + path, headers=headers)
+        async with self.http.get(self.url + path, headers=headers) as res:
+            await res.read()
+            return res
 
     async def put(self, path:str, body:bytes, headers=None):
         if headers is None:
@@ -46,11 +48,15 @@ class EmailSubmissionS3Storage:
         headers['date'] = headers.get('date') or format_date_time(time())
         headers['content-type'] = headers.get('content-type') or 'message/rfc822'
         headers['authorization'] = self._auth('PUT', path, headers['date'], headers['content-type'])
-        return await self.http.put(self.url + path, body=body, headers=headers)
+        async with self.http.put(self.url + path, body=body, headers=headers) as res:
+            await res.read()
+            return res
 
     async def delete(self, path:str, headers=None):
         if headers is None:
             headers = {}
         headers['date'] = headers.get('date') or format_date_time(time())
         headers['authorization'] = self._auth('DELETE', path, headers['date'])
-        return await self.http.delete(self.url + path, headers=headers)
+        async with self.http.delete(self.url + path, headers=headers) as res:
+            await res.read()
+            return res

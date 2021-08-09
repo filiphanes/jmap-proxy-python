@@ -8,7 +8,6 @@ except ImportError:
     import json
 
 import aiomysql
-import aiosmtplib
 
 from jmap import errors
 from jmap.core import MAX_OBJECTS_IN_GET
@@ -34,18 +33,14 @@ CREATE_TABLE_SQL = '''CREATE TABLE emailSubmissions (
 );'''
 
 
-class SmtpScheduledAccountMixin:
+class DelayedSubmissionMixin:
     """
     Implements email submission and identities
     """
-    def __init__(self, db, storage, username, password=None, smtp_host='localhost', smtp_port=25, email=None):
+    def __init__(self, db, storage, smtp=None):
         self.db = db
         self.storage = storage
-        self.smtp_user = username
-        self.smtp_pass = password
-        self.smtp_host = smtp_host
-        self.smtp_port = smtp_port
-        self.email = email or username
+        self.smtp = smtp
         self.capabilities["urn:ietf:params:jmap:submission"] = {
             "submissionExtensions": [],
             "maxDelayedSend": 44236800  # 512 days
@@ -70,8 +65,8 @@ class SmtpScheduledAccountMixin:
                 created = {}
                 notCreated = {}
                 if create:
-                    emailIds = [e['emailId'] for e in create.values()]
-                    await self.fill_emails(['blobId', 'threadId'], emailIds)
+                    await self.fill_emails(['blobId', 'threadId'], [e['emailId'] for e in create.values()])
+                    await self.fill_identities()
                     for cid, submission in create.items():
                         try:
                             created[cid] = await self.create_emailsubmission(submission, newState, cursor)
@@ -167,14 +162,14 @@ class SmtpScheduledAccountMixin:
             raise errors.invalidEmail('Date header parse error')
 
         id = uuid4().hex
-        async with self.storage.put(f'/{id}', body) as res:
-            if res.status >= 400:
-                raise errors.serverFail(f'PUT status={res.status}')
+        res = await self.storage.put(f'/{id}', body)
+        if res.status >= 400:
+            raise errors.serverFail(f'PUT status={res.status}')
 
         try:
             await cursor.execute('''INSERT INTO emailSubmissions
                 (id, accountId, identityId, emailId, threadId, sendAt, envelope, undoStatus, created)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s);''', [
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s);''', [
                     id,
                     self.id,
                     submission['identityId'],
@@ -298,6 +293,7 @@ class SmtpScheduledAccountMixin:
                 newState = 0
                 changes = 0
                 hasMoreChanges = False
+                created, updated, destroyed = 0, 0, 0
                 # COALESCE(destroyed, updated, created) returns maximum value
                 # because destroyed > updated > created and NULL if not set and created is NOT NULL
                 # GREATEST(created, updated, destroyed) can be used on MariaDB,
@@ -402,15 +398,6 @@ class SmtpScheduledAccountMixin:
                                             upToId=None, calculateTotal=False):
         raise errors.cannotCalculateChanges()
 
-    async def emailsubmission_send_scheduled(self):
-        """Sends scheduled emails, intended to be in called in short intervals (ie. by cron)"""
-        raise NotImplementedError()
-
-    async def emailsubmission_cleanup(self):
-        """Deletes old destroyed objects"""
-        raise NotImplementedError()
-
-
 
 def to_sql_where(criteria, sql: bytearray, args: list):
     if 'operator' in criteria:
@@ -493,6 +480,7 @@ UNKNOWN = 0
 YES = 1
 NO = 2
 QUEUED = 3
+
 undoStatus_map = {
     'pending': PENDING, 'final': FINAL, 'canceled': CANCELED,
     PENDING: 'pending', FINAL: 'final', CANCELED: 'canceled',
