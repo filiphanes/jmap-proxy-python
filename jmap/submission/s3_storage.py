@@ -1,36 +1,40 @@
-import base64
+from binascii import b2a_base64
 from hashlib import sha1
 import hmac
 import os
 from time import time
+from urllib.parse import urlparse
 from wsgiref.handlers import format_date_time
 
 
 class EmailSubmissionS3Storage:
     """Requests like API for storing body"""
 
-    def __init__(self, url, bucket=None, access_key=None, secret_key=None, http_session=None):
+    def __init__(self, url=None, access_key=None, secret_key=None, http_session=None):
         if url is None:
-            url = os.getenv('S3_URL', 'http://127.0.0.1/emailsubmission')
-        if bucket is None:
-            bucket = os.getenv('S3_BUCKET', 'emailsubmission')
+            url = os.getenv('S3_URL', 'https://s3.us-east-1.amazonaws.com/bucket/optional-prefix')
+        self.url = url.rstrip('/')
+        self.bucket, _, _ = urlparse(url, 'https').path[1:].partition('/')
+        if not self.bucket:
+            raise ValueError('Bucket in S3_URL is required')
+
         if access_key is None:
             access_key = os.getenv('S3_ACCESS_KEY', 'access_key')
+        self.access_key = access_key
+
         if secret_key is None:
             secret_key = os.getenv('S3_SECRET_KEY', 'secret_key')
+        self.secret_key = secret_key
+
         if http_session is None:
             import aiohttp
             http_session = aiohttp.ClientSession()
-        self.url = url
-        self.bucket = bucket
-        self.access_key = access_key
-        self.secret_key = secret_key
         self.http = http_session
 
-    def _auth(self, verb:str, path:str, date:str, typ:str='', md5:str=''):
+    def _auth(self, verb:str, path:str, date:str, typ:str='', md5:str='') -> str:
         toSign = f"{verb}\n{md5}\n{typ}\n{date}\n/{self.bucket}{path}"
         digest = hmac.new(self.secret_key.encode("utf8"), toSign.encode('utf8'), sha1).digest()
-        signature = base64.encodestring(digest).strip().decode()
+        signature = b2a_base64(digest).strip().decode()
         return f"AWS {self.access_key}:{signature}"
 
     async def get(self, path: str, headers=None):
@@ -38,25 +42,19 @@ class EmailSubmissionS3Storage:
             headers = {}
         headers['date'] = headers.get('date') or format_date_time(time())
         headers['authorization'] = self._auth('GET', path, headers['date'])
-        async with self.http.get(self.url + path, headers=headers) as res:
-            await res.read()
-            return res
+        return await self.http.get(f"{self.url}{path}", headers=headers)
 
-    async def put(self, path:str, body:bytes, headers=None):
+    async def put(self, path:str, data:bytes, headers=None):
         if headers is None:
             headers = {}
         headers['date'] = headers.get('date') or format_date_time(time())
         headers['content-type'] = headers.get('content-type') or 'message/rfc822'
         headers['authorization'] = self._auth('PUT', path, headers['date'], headers['content-type'])
-        async with self.http.put(self.url + path, body=body, headers=headers) as res:
-            await res.read()
-            return res
+        return await self.http.put(f"{self.url}{path}", data=data, headers=headers)
 
     async def delete(self, path:str, headers=None):
         if headers is None:
             headers = {}
         headers['date'] = headers.get('date') or format_date_time(time())
         headers['authorization'] = self._auth('DELETE', path, headers['date'])
-        async with self.http.delete(self.url + path, headers=headers) as res:
-            await res.read()
-            return res
+        return await self.http.delete(f"{self.url}{path}", headers=headers)

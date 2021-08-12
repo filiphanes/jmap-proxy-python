@@ -1,36 +1,42 @@
 from datetime import datetime
-from email.utils import parsedate_to_datetime
-from re import sub
+from email.utils import parsedate_to_datetime, getaddresses
+from enum import Enum
+import itertools
 from uuid import uuid4
-try:
-    import orjson as json
-except ImportError:
-    import json
 
 import aiomysql
 
 from jmap import errors
 from jmap.core import MAX_OBJECTS_IN_GET
-from jmap.parse import HeadersBytesParser
+from jmap.parse import BytesHeaderParser, asAddresses
 
-CREATE_TABLE_SQL = '''CREATE TABLE emailSubmissions (
+CREATE_TABLE_SQL = '''
+CREATE TABLE emailSubmissions (
   `id` VARCHAR(64) NOT NULL,
   `accountId` VARCHAR(64) NOT NULL,
   `identityId` VARCHAR(64) NOT NULL,
   `emailId` VARCHAR(64) NOT NULL,
   `threadId` VARCHAR(64) NULL,
-  `envelope` TEXT(64000) NULL,
+  `sender` VARCHAR(64) NOT NULL,
+  `recipients` TEXT(64000) NULL,
   `sendAt` DATETIME NULL,
   `undoStatus` TINYINT NOT NULL DEFAULT 0,
-  `smtpReply` TEXT(64000) NULL,
-  `delivered` TINYINT NOT NULL DEFAULT 0,
-  `displayed` TINYINT NOT NULL DEFAULT 0,
   `created` INT UNSIGNED NOT NULL DEFAULT 0,
   `updated` INT UNSIGNED NULL,
   `destroyed` INT UNSIGNED NULL,
+  `lockedBy` VARCHAR(64) NULL,
+  `retry` TINYINT NOT NULL DEFAULT 0,
   PRIMARY KEY (`id`),
   INDEX `accountId` (`accountId` ASC)
-);'''
+);
+'''
+
+EMAIL_SUBMISSION_PROPERTIES = set('id identityId accountId emailId threadId envelope sendAt undoStatus deliveryStatus dsnBlobIds mdnBlobIds'.split())
+
+class UndoStatus(Enum):
+    pending = 0
+    final = 1
+    canceled = 2
 
 
 class DelayedSubmissionMixin:
@@ -81,24 +87,40 @@ class DelayedSubmissionMixin:
                 notUpdated = {}
                 for id, data in (update or {}).items():
                     try:
-                        undoStatus = undoStatus_map[data['undoStatus']]
-                        if undoStatus != CANCELED:
+                        undoStatus = UndoStatus[data['undoStatus']]
+                        if undoStatus != UndoStatus.canceled:
                             notUpdated[id] = errors.invalidArguments('undoStatus can be only canceled').to_dict()
                             continue
-                        await cursor.execute('UPDATE emailSubmissions SET updated=%s, undoStatus=%s WHERE accountId=%s AND id=%s',
-                                        [newState, undoStatus, self.id, id])
+                        sql = f"""UPDATE emailSubmissions
+                            SET updated=%s,
+                                undoStatus=%s
+                            WHERE id=%s
+                              AND undoStatus={UndoStatus.pending.value}
+                              AND lockedBy=NULL"""
+                        await cursor.execute(sql, [newState, undoStatus.value, id])
                         if cursor.rowcount == 0:
-                            notUpdated[id] = errors.notFound().to_dict()
+                            # Check where is problem
+                            await cursor.execute("SELECT undoStatus FROM emailSubmission WHERE id=%s", [id])
+                            for us in await cursor.fetchall():
+                                if UndoStatus(us) != UndoStatus.pending:
+                                    notUpdated[id] = errors.invalidPatch('undoStatus is not pending').to_dict()
+                                else:
+                                    notUpdated[id] = errors.cannotUnsend('emailSubmission locked').to_dict()
+                            if id not in notUpdated:
+                                notUpdated[id] = errors.notFound().to_dict()
                     except Exception as e:
                         notUpdated[id] = errors.notFound().to_dict()
+                    except KeyError:
+                        notUpdated[id] = errors.invalidProperties(f"Unknown undoStatus {data['undoStatus']}",
+                                                                  properties=['undoStatus']).to_dict()
 
                 # DESTROY
                 destroyed = []
                 notDestroyed = {}
                 for id in (destroy or ()):
                     try:
-                        await cursor.execute('UPDATE emailSubmissions SET destroyed=%s WHERE accountId=%s AND id=%s',
-                                             [newState, self.id, id])
+                        await cursor.execute('UPDATE emailSubmissions SET destroyed=%s WHERE id=%s',
+                                             [newState, id])
                         if cursor.rowcount == 0:
                             notDestroyed[id] = errors.notFound().to_dict()
                     except Exception as e:
@@ -145,21 +167,55 @@ class DelayedSubmissionMixin:
         missingProps = [p for p in ['identityId', 'emailId'] if p not in submission]
         if missingProps:
             raise errors.invalidProperties("missing", properties=missingProps)
-        # TODO: identity_get
-        if submission['identityId'] not in self.identities:
+        identity = self.identities.get(submission['identityId'])
+        if identity is None:
             raise errors.notFound(f"Identity {submission['identityId']} not found")
         email = self.emails.get(submission['emailId'])
         if not email:
             raise errors.notFound(f"EmailId {submission['emailId']} not found")
 
         body = await self.download(email['blobId'])
-        message = HeadersBytesParser.parse_from_bytes(body)
+        msg = BytesHeaderParser.parse_from_bytes(body)
         try:
-            sendAt = parsedate_to_datetime(message.get('Date').encode())
+            sendAt = parsedate_to_datetime(msg.get('Date').encode())
         except AttributeError:
             sendAt = datetime.now()
         except Exception:
             raise errors.invalidEmail('Date header parse error')
+
+        envelope = submission.get('envelope')
+        if envelope:
+            sender = envelope['mailFrom']['email']
+            recipients = {a['email'] for a in envelope['rcptTo']}
+        else:
+            try:
+                addresses, = msg.get_all('sender') or msg.get_all('from')
+                sender, = asAddresses(addresses)
+            except ValueError:
+                raise errors.invalidEmail('multiple sender/from addresses', properties=['emailId'])
+            sender_user, _, sender_domain = sender['email'].partition('@')
+            identity_user, _, identity_domain = identity['email'].partition('@')
+            # If the address found from this is not allowed by the Identity associated
+            # with this submission, the email property from the Identity MUST be used instead.
+            if sender['email'] != identity['email']:
+                if identity_user == '*' and sender_domain == identity_domain:
+                    # If the mailbox part of the address is * (e.g., *@example.com)
+                    # then the client may use any valid address ending in that domain
+                    pass
+                else:
+                    sender['email'] = identity['email']
+            addresslist = getaddresses(itertools.chain(
+                msg.get_all('to'),
+                msg.get_all('cc'),
+                msg.get_all('bcc'),
+            ))
+            recipients = {email for name, email in addresslist}  # dedupliction
+            envelope = {
+                'mailFrom': sender,
+                # The deduplicated set of email addresses from the To, Cc, and Bcc
+                # header fields, if present, with no parameters for any of them.
+                'rcptTo': [{'email': e} for e in recipients],
+            }
 
         id = uuid4().hex
         res = await self.storage.put(f'/{id}', body)
@@ -168,16 +224,17 @@ class DelayedSubmissionMixin:
 
         try:
             await cursor.execute('''INSERT INTO emailSubmissions
-                (id, accountId, identityId, emailId, threadId, sendAt, envelope, undoStatus, created)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s);''', [
+                (id, accountId, identityId, emailId, threadId, sendAt, sender, recipients, undoStatus, created)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s);''', [
                     id,
                     self.id,
                     submission['identityId'],
                     submission['emailId'],
                     email['threadId'],
                     sendAt,
-                    json.dumps(submission.get('envelope')),
-                    PENDING,
+                    sender,
+                    ','.join(recipients),
+                    UndoStatus.pending.value,
                     newState,
                 ])
         except Exception as e:
@@ -220,10 +277,10 @@ class DelayedSubmissionMixin:
         else:
             properties = EMAIL_SUBMISSION_PROPERTIES
 
-        columns = properties - {'dsnBlobIds', 'mdnBlobIds', 'deliveryStatus'}
+        columns = properties - {'dsnBlobIds', 'mdnBlobIds', 'deliveryStatus', 'envelope'}
         columns.add('id')  # always present
-        if 'deliveryStatus' in properties:  # break to db columns
-            columns.update(['smtpReply', 'delivered', 'displayed'])
+        if 'envelope' in properties:  # break to db columns
+            columns.update(['sender', 'recipients'])
 
         # Build SQL
         # don't afraid of injection, columns are checked against EMAIL_SUBMISSION_PROPERTIES
@@ -246,16 +303,15 @@ class DelayedSubmissionMixin:
             async with conn.cursor(aiomysql.DictCursor) as c:
                 await c.execute(sql, sql_args)
                 for submission in await c.fetchall():
-                    if 'envelope' in submission:
-                        submission['envelope'] = json.loads(submission['envelope'])
-                    if 'undoStatus' in submission:
-                        submission['undoStatus'] = undoStatus_map[submission['undoStatus']]
-                    if 'deliveryStatus' in properties:  # subdict from columns
-                        submission['deliveryStatus'] = {
-                            'smtpReply': submission.pop('smtpReply'),
-                            'delivered': delivered_map[submission.pop('delivered')],
-                            'displayed': displayed_map[submission.pop('displayed')],
+                    if 'envelope' in properties:
+                        submission['envelope'] = {
+                            'mailFrom': {'email': submission.pop('sender')},
+                            'rcptTo': [{'email': e} for e in submission.pop('recipients').split()],
                         }
+                    if 'undoStatus' in submission:
+                        submission['undoStatus'] = UndoStatus(submission['undoStatus']).name
+                    if 'deliveryStatus' in properties:
+                        submission['deliveryStatus'] = None
                     if 'dsnBlobIds' in properties:
                         submission['dsnBlobIds'] = []
                     if 'mdnBlobIds' in properties:
@@ -443,7 +499,7 @@ def to_sql_where(criteria, sql: bytearray, args: list):
             args.extend(value)
         elif 'undoStatus' == crit:
             sql += b'undoStatus=%s'
-            args.append(undoStatus_map[value])
+            args.append(UndoStatus[value].value)
         elif 'before' == crit:
             sql += b'sendAt<%s'
             args.append(datetime.fromisoformat(value.rstrip('Z')))
@@ -469,27 +525,3 @@ def to_sql_sort(sort, sql: bytearray):
             sql += b' DESC,'
     if sort:
         sql.pop()
-
-
-EMAIL_SUBMISSION_PROPERTIES = set('id identityId accountId emailId threadId envelope sendAt undoStatus deliveryStatus dsnBlobIds mdnBlobIds'.split())
-
-PENDING = 0
-FINAL = 1
-CANCELED = 2
-UNKNOWN = 0
-YES = 1
-NO = 2
-QUEUED = 3
-
-undoStatus_map = {
-    'pending': PENDING, 'final': FINAL, 'canceled': CANCELED,
-    PENDING: 'pending', FINAL: 'final', CANCELED: 'canceled',
-}
-delivered_map = {
-    'unknown': UNKNOWN, 'yes': YES, 'no': NO, 'queued': QUEUED,
-    UNKNOWN: 'unknown', YES: 'yes', NO: 'no', QUEUED: 'queued',
-}
-displayed_map = {
-    'unknown': UNKNOWN, 'yes': YES,
-    UNKNOWN: 'unknown', YES: 'yes',
-}

@@ -64,7 +64,7 @@ async def scheduled_account(db_pool, accountId, email_id, email_id2):
             self.name = username
             self.capabilities = {}
             storage = DictStorage()
-            super().__init__(db, storage, username, password=password, smtp_host=smtp_host, smtp_port=smtp_port, email=email)
+            super().__init__(db, storage)
             self.emails = {
                 email_id: {
                     'blobId': blobId1,
@@ -187,3 +187,9 @@ def email_id(uidvalidity):
 def email_id2(uidvalidity):
     return f"{uidvalidity}-202"
 
+
+@pytest.fixture()
+@pytest.mark.asyncio
+async def s3_storage():
+    from jmap.submission.s3_storage import EmailSubmissionS3Storage
+    return EmailSubmissionS3Storage()

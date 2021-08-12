@@ -245,7 +245,7 @@ empty_line_re = re.compile(br'\n\n')
 IMS = re.I | re.M | re.DOTALL
 header_pattern = br'^%s:(.+?)\n(?=[\w\n])'  # re.I | re.M | re.DOTALL
 
-class HeadersBytesParser:
+class BytesHeaderParser:
     """Fast header parser"""
 
     __slots__ = ['headers']
@@ -261,9 +261,13 @@ class HeadersBytesParser:
     def parse_from_bytes(cls, body: typing.Union[bytes, memoryview, bytearray]):
         return cls(memoryview(body))
 
-    def get(self, key, default=None):
+    def get(self, key, failobj=None):
         match = re.search(header_pattern % key.encode(), self.headers, IMS)
         try:
             return match.group(1)
         except AttributeError:
-            return default
+            return failobj
+
+    def get_all(self, key, failobj=None):
+        return [m[1] for m in re.finditer(header_pattern % key.encode(), self.headers, IMS)] or failobj
+
