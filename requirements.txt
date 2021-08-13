@@ -1,4 +1,3 @@
-aioboto3
 aiofiles
 aiohttp
 aioimaplib

@@ -6,7 +6,12 @@ from time import time
 from urllib.parse import urlparse
 from wsgiref.handlers import format_date_time
 
+from aiohttp import ClientSession
 
+from .dict_storage import Response
+
+
+#TODO: reuse one ClientSession for requests
 class EmailSubmissionS3Storage:
     """Requests like API for storing body"""
 
@@ -27,8 +32,7 @@ class EmailSubmissionS3Storage:
         self.secret_key = secret_key
 
         if http_session is None:
-            import aiohttp
-            http_session = aiohttp.ClientSession()
+            http_session = ClientSession()
         self.http = http_session
 
     def _auth(self, verb:str, path:str, date:str, typ:str='', md5:str='') -> str:
@@ -40,21 +44,27 @@ class EmailSubmissionS3Storage:
     async def get(self, path: str, headers=None):
         if headers is None:
             headers = {}
-        headers['date'] = headers.get('date') or format_date_time(time())
+        headers['date'] = headers.get('date', format_date_time(time()))
         headers['authorization'] = self._auth('GET', path, headers['date'])
-        return await self.http.get(f"{self.url}{path}", headers=headers)
+        async with ClientSession() as http:
+            async with http.get(f"{self.url}{path}", headers=headers) as res:
+                return Response(res.status, await res.read())
 
     async def put(self, path:str, data:bytes, headers=None):
         if headers is None:
             headers = {}
-        headers['date'] = headers.get('date') or format_date_time(time())
-        headers['content-type'] = headers.get('content-type') or 'message/rfc822'
+        headers['date'] = headers.get('date', format_date_time(time()))
+        headers['content-type'] = headers.get('content-type', 'message/rfc822')
         headers['authorization'] = self._auth('PUT', path, headers['date'], headers['content-type'])
-        return await self.http.put(f"{self.url}{path}", data=data, headers=headers)
+        async with ClientSession() as http:
+            async with http.put(f"{self.url}{path}", data=data, headers=headers) as res:
+                return Response(res.status, await res.read())
 
     async def delete(self, path:str, headers=None):
         if headers is None:
             headers = {}
-        headers['date'] = headers.get('date') or format_date_time(time())
+        headers['date'] = headers.get('date', format_date_time(time()))
         headers['authorization'] = self._auth('DELETE', path, headers['date'])
-        return await self.http.delete(f"{self.url}{path}", headers=headers)
+        async with ClientSession() as http:
+            async with http.delete(f"{self.url}{path}", headers=headers) as res:
+                return Response(res.status, await res.read())

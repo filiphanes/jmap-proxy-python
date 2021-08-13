@@ -210,38 +210,37 @@ async def process_items(db, storage, items):
 
 async def daemon_start(db=None):
     global _stop
-    http_session = aiohttp.ClientSession()
-    storage = EmailSubmissionS3Storage(http_session=http_session)
-    url = urlparse(MYSQL_URL)
-    while not _stop:
-        try:
-            log.debug('Daemon loop')
-            db = await aiomysql.connect(
-                host=url.hostname,
-                port=url.port or 3306,
-                user=url.username,
-                password=url.password,
-                db=url.path[1:],
-                charset=MYSQL_CHARSET,
-                use_unicode=True,
-                autocommit=True
-            )
+    async with aiohttp.ClientSession() as http_session:
+        storage = EmailSubmissionS3Storage(http_session=http_session)
+        url = urlparse(MYSQL_URL)
+        while not _stop:
+            try:
+                log.debug('Daemon loop')
+                db = await aiomysql.connect(
+                    host=url.hostname,
+                    port=url.port or 3306,
+                    user=url.username,
+                    password=url.password,
+                    db=url.path[1:],
+                    charset=MYSQL_CHARSET,
+                    use_unicode=True,
+                    autocommit=True
+                )
 
-            await lock_items(db)
-            items = await get_locked_items(db)
-            await process_items(db, storage, items)
+                await lock_items(db)
+                items = await get_locked_items(db)
+                await process_items(db, storage, items)
 
-        except aiomysql.OperationalError:
-            log.exception('Reconnect?')
-            await asyncio.sleep(DELAY_TIME*9)
+            except aiomysql.OperationalError:
+                log.exception('Reconnect?')
+                await asyncio.sleep(DELAY_TIME*9)
 
-        except Exception:
-            log.exception(f'Unknown exception ')
+            except Exception:
+                log.exception(f'Unknown exception ')
 
-        db.close()
-        await asyncio.sleep(DELAY_TIME)
+            db.close()
+            await asyncio.sleep(DELAY_TIME)
 
-    await http_session.close()
     log.debug('Stopped')
 
 
