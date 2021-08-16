@@ -53,17 +53,16 @@ async def db_identity_account(db_pool, accountId):
 
 @pytest.fixture()
 @pytest.mark.asyncio
-async def scheduled_account(db_pool, accountId, email_id, email_id2):
-    from jmap.submission.scheduled import DelayedSubmissionMixin
+async def scheduled_account(db_pool, dict_storage, accountId, email_id, email_id2):
+    from jmap.submission.scheduled import ScheduledSubmissionMixin
     from jmap.submission.dict_storage import DictStorage
     blobId1 = 'blob1'
     blobId2 = 'blob2'
-    class AccountMock(DelayedSubmissionMixin):
-        def __init__(self, db, username, password, smtp_host, smtp_port, email):
+    class AccountMock(ScheduledSubmissionMixin):
+        def __init__(self, db, storage, username):
             self.id = username
             self.name = username
             self.capabilities = {}
-            storage = DictStorage()
             super().__init__(db, storage)
             self.emails = {
                 email_id: {
@@ -76,7 +75,18 @@ async def scheduled_account(db_pool, accountId, email_id, email_id2):
                 },
             }
             self.blobs = {
-                blobId1: b'''body1''',
+                blobId1: b'''Date: Mon, 16 Aug 2021 04:03:21 -0000 (GMT)
+From: test@example org
+To: "Filip Hanes" <filip.hanes@example.com>
+Cc: "Filip Hanes" <filip.hanes@example.com>
+Bcc: "Filip Hanes" <filip.hanes@example.com>
+Message-Id: <417496569.8545537@example.org>
+Subject: Test subject
+Mime-Version: 1.0
+Content-Type: text/plain
+
+Hi, how are you?
+''',
                 blobId2: b'''body2''',
             }
             self.identities = {
@@ -109,7 +119,13 @@ async def scheduled_account(db_pool, accountId, email_id, email_id2):
         async with conn.cursor() as cursor:
             await cursor.execute('DELETE FROM emailSubmissions WHERE accountId=%s', [accountId])
         await conn.commit()
-    return AccountMock(db_pool, accountId, 'h', '127.0.0.1', 25, accountId)
+    return AccountMock(db_pool, dict_storage, accountId)
+
+@pytest.fixture()
+@pytest.mark.asyncio
+async def scheduled_daemon(dict_storage, db_pool):
+    from jmap.submission.scheduled_daemon import ScheduledDaemon
+    return ScheduledDaemon(storage=dict_storage, db_pool=db_pool, smtp_url='smtp://user1:pass1@127.0.0.1:1025')
 
 
 @pytest.fixture()
@@ -193,3 +209,10 @@ def email_id2(uidvalidity):
 async def s3_storage():
     from jmap.submission.s3_storage import EmailSubmissionS3Storage
     return EmailSubmissionS3Storage()
+
+
+@pytest.fixture()
+@pytest.mark.asyncio
+async def dict_storage():
+    from jmap.submission.dict_storage import DictStorage
+    return DictStorage()

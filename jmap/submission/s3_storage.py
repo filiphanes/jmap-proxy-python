@@ -12,6 +12,8 @@ from .dict_storage import Response
 
 
 #TODO: reuse one ClientSession for requests
+# We create new ClientSession on each request,
+# because our tested S3 caused ServerDisconectedError when reusing 1 ClientSession
 class EmailSubmissionS3Storage:
     """Requests like API for storing body"""
 

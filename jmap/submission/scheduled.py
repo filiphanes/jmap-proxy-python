@@ -39,7 +39,7 @@ class UndoStatus(Enum):
     canceled = 2
 
 
-class DelayedSubmissionMixin:
+class ScheduledSubmissionMixin:
     """
     Implements email submission and identities
     """
